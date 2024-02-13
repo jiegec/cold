@@ -1,4 +1,4 @@
-use cold::parse_opts;
+use cold::{link, parse_opts};
 use log::info;
 
 fn main() -> anyhow::Result<()> {
@@ -11,5 +11,7 @@ fn main() -> anyhow::Result<()> {
     let opt = parse_opts(&args)?;
 
     info!("parsed options: {opt:?}");
+
+    link(&opt)?;
     Ok(())
 }

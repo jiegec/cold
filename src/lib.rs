@@ -1,4 +1,7 @@
+use std::path::PathBuf;
+
 use anyhow::anyhow;
+use log::info;
 
 /// handle --push-state/--pop-state
 #[derive(Debug, Copy, Clone)]
@@ -7,6 +10,13 @@ struct OptStack {
     pub as_needed: bool,
     /// -static
     pub link_static: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileOpt {
+    pub name: String,
+    /// --as-needed
+    pub as_needed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -21,7 +31,7 @@ pub struct LibraryOpt {
 #[derive(Debug, Clone)]
 pub enum ObjFileOpt {
     /// objfile
-    File(String),
+    File(FileOpt),
     /// -l namespec
     Library(LibraryOpt),
     /// --start-group
@@ -142,11 +152,62 @@ pub fn parse_opts(args: &Vec<String>) -> anyhow::Result<Opt> {
             }
             s @ _ => {
                 // object file argument
-                opt.obj_file.push(ObjFileOpt::File(s.to_string()));
+                opt.obj_file.push(ObjFileOpt::File(FileOpt {
+                    name: s.to_string(),
+                    as_needed: cur_opt_stack.as_needed,
+                }));
             }
         }
     }
     Ok(opt)
+}
+
+fn lookup_file(name: &str, paths: &Vec<String>) -> anyhow::Result<PathBuf> {
+    for path in paths {
+        let mut p = PathBuf::from(path);
+        p.push(name);
+        if p.is_file() {
+            info!("File {name} is found at {}", p.display());
+            return Ok(p);
+        }
+    }
+    Err(anyhow!("File {name} cannot be found"))
+}
+
+/// Do the actual linking
+pub fn link(opt: &Opt) -> anyhow::Result<()> {
+    info!("link with options: {opt:?}");
+    let mut opt = opt.clone();
+
+    // resolve library to actual files
+    for obj_file in &mut opt.obj_file {
+        // convert ObjFileOpt::Library to ObjFileOpt::File
+        if let ObjFileOpt::Library(lib) = obj_file {
+            if !lib.link_static {
+                // lookup dynamic library first
+                let path = format!("lib{}.so", lib.name);
+                if let Ok(path) = lookup_file(&path, &opt.search_dir) {
+                    *obj_file = ObjFileOpt::File(FileOpt {
+                        name: format!("{}", path.display()),
+                        as_needed: lib.as_needed,
+                    });
+                    continue;
+                }
+            }
+
+            // lookup static library
+            let path = format!("lib{}.a", lib.name);
+            let path = lookup_file(&path, &opt.search_dir)?;
+            *obj_file = ObjFileOpt::File(FileOpt {
+                name: format!("{}", path.display()),
+                as_needed: lib.as_needed,
+            });
+            continue;
+        }
+    }
+    info!("options after path resolution: {opt:?}");
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -155,32 +216,32 @@ mod tests {
     #[test]
     fn test_push_pop_state() {
         let opts = parse_opts(&vec![
-            "-llib1".to_string(),
+            "-la".to_string(),
             "--push-state".to_string(),
             "--as-needed".to_string(),
-            "-llib2".to_string(),
+            "-lb".to_string(),
             "--pop-state".to_string(),
-            "-llib3".to_string(),
+            "-lc".to_string(),
         ])
         .unwrap();
 
         assert_eq!(opts.obj_file.len(), 3);
         if let ObjFileOpt::Library(lib) = &opts.obj_file[0] {
-            assert_eq!(lib.name, "lib1");
+            assert_eq!(lib.name, "a");
             assert_eq!(lib.as_needed, false);
         } else {
             assert!(false);
         }
 
         if let ObjFileOpt::Library(lib) = &opts.obj_file[1] {
-            assert_eq!(lib.name, "lib2");
+            assert_eq!(lib.name, "b");
             assert_eq!(lib.as_needed, true);
         } else {
             assert!(false);
         }
 
         if let ObjFileOpt::Library(lib) = &opts.obj_file[2] {
-            assert_eq!(lib.name, "lib3");
+            assert_eq!(lib.name, "c");
             assert_eq!(lib.as_needed, false);
         } else {
             assert!(false);
