@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
-use anyhow::anyhow;
-use log::info;
+use anyhow::{anyhow, Context};
+use goblin::{archive::Archive, Object};
+use log::{info, warn};
 
 /// handle --push-state/--pop-state
 #[derive(Debug, Copy, Clone)]
@@ -206,12 +207,57 @@ pub fn path_resolution(opt: &Opt) -> anyhow::Result<Opt> {
     Ok(opt)
 }
 
+#[derive(Debug, Clone)]
+pub struct ObjFile {
+    pub name: String,
+    /// --as-needed
+    pub as_needed: bool,
+    pub content: Vec<u8>,
+}
+
 /// Do the actual linking
 pub fn link(opt: &Opt) -> anyhow::Result<()> {
-    info!("link with options: {opt:?}");
+    info!("Link with options: {opt:?}");
 
     let opt = path_resolution(&opt)?;
-    info!("options after path resolution: {opt:?}");
+    info!("Options after path resolution: {opt:?}");
+
+    // read files
+    let mut files = vec![];
+    for obj_file in &opt.obj_file {
+        match obj_file {
+            ObjFileOpt::File(file_opt) => {
+                info!("Reading {}", file_opt.name);
+                files.push(ObjFile {
+                    name: file_opt.name.clone(),
+                    as_needed: file_opt.as_needed,
+                    content: std::fs::read(&file_opt.name)
+                        .context(format!("Reading file {}", file_opt.name))?,
+                });
+            }
+            ObjFileOpt::Library(_) => unreachable!("Path resolution is not working"),
+            ObjFileOpt::StartGroup => warn!("--start-group unhandled"),
+            ObjFileOpt::EndGroup => warn!("--end-group unhandled"),
+        }
+    }
+
+    // parse files and resolve symbols
+    for file in &files {
+        info!("Parsing {}", file.name);
+        if file.name.ends_with(".a") {
+            // archive
+            let ar = Archive::parse(&file.content)
+                .context(format!("Parsing file {} as archive", file.name))?;
+        } else {
+            // object
+            let obj = Object::parse(&file.content)
+                .context(format!("Parsing file {} as object", file.name))?;
+            if let Object::Elf(elf) = obj {
+            } else {
+                return Err(anyhow!("Unsupported format of file {}", file.name));
+            }
+        }
+    }
 
     Ok(())
 }
