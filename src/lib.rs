@@ -174,12 +174,10 @@ fn lookup_file(name: &str, paths: &Vec<String>) -> anyhow::Result<PathBuf> {
     Err(anyhow!("File {name} cannot be found"))
 }
 
-/// Do the actual linking
-pub fn link(opt: &Opt) -> anyhow::Result<()> {
-    info!("link with options: {opt:?}");
-    let mut opt = opt.clone();
-
+/// Resolve library namespec to paths
+pub fn path_resolution(opt: &Opt) -> anyhow::Result<Opt> {
     // resolve library to actual files
+    let mut opt = opt.clone();
     for obj_file in &mut opt.obj_file {
         // convert ObjFileOpt::Library to ObjFileOpt::File
         if let ObjFileOpt::Library(lib) = obj_file {
@@ -205,6 +203,14 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
             continue;
         }
     }
+    Ok(opt)
+}
+
+/// Do the actual linking
+pub fn link(opt: &Opt) -> anyhow::Result<()> {
+    info!("link with options: {opt:?}");
+
+    let opt = path_resolution(&opt)?;
     info!("options after path resolution: {opt:?}");
 
     Ok(())
