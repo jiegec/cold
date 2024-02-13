@@ -1,3 +1,5 @@
+# Linker
+
 https://www.airs.com/blog/archives/38
 https://www.airs.com/blog/archives/39
 https://www.airs.com/blog/archives/40
@@ -14,7 +16,25 @@ https://www.airs.com/blog/archives/50
 https://www.airs.com/blog/archives/51
 https://www.airs.com/blog/archives/52
 https://www.airs.com/blog/archives/53
+https://www.airs.com/blog/archives/54
+https://www.airs.com/blog/archives/55
+https://www.airs.com/blog/archives/56
+https://www.airs.com/blog/archives/57
 https://linker.iecc.com/
 https://briancallahan.net/blog/20210609.html
 https://github.com/andrewhalle/byo-linker
+
+# ELF
+
+https://refspecs.linuxfoundation.org/elf/elf.pdf
 https://docs.rs/goblin/latest/goblin/
+https://en.wikipedia.org/wiki/Executable_and_Linkable_Format
+https://wiki.osdev.org/ELF
+
+# ISA
+
+https://refspecs.linuxbase.org/elf/x86_64-abi-0.99.pdf
+https://github.com/riscv-non-isa/riscv-elf-psabi-doc/blob/master/riscv-elf.adoc
+http://www.sco.com/developers/devspecs/mipsabi.pdf
+https://github.com/ARM-software/abi-aa/releases/download/2022Q1/aaelf32.pdf
+https://github.com/loongson/la-abi-specs
