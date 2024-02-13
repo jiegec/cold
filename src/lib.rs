@@ -1,8 +1,7 @@
-use std::path::PathBuf;
-
 use anyhow::{anyhow, Context};
-use goblin::{archive::Archive, Object};
 use log::{info, warn};
+use object::{Object, ObjectSection};
+use std::path::PathBuf;
 
 /// handle --push-state/--pop-state
 #[derive(Debug, Copy, Clone)]
@@ -246,15 +245,19 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
         info!("Parsing {}", file.name);
         if file.name.ends_with(".a") {
             // archive
-            let ar = Archive::parse(&file.content)
+            let ar = object::read::archive::ArchiveFile::parse(file.content.as_slice())
                 .context(format!("Parsing file {} as archive", file.name))?;
         } else {
             // object
-            let obj = Object::parse(&file.content)
+            let obj = object::File::parse(file.content.as_slice())
                 .context(format!("Parsing file {} as object", file.name))?;
-            if let Object::Elf(elf) = obj {
-            } else {
-                return Err(anyhow!("Unsupported format of file {}", file.name));
+            match obj {
+                object::File::Elf64(elf) => {
+                    for section in elf.sections() {
+                        info!("Handling section {}", section.name()?);
+                    }
+                }
+                _ => return Err(anyhow!("Unsupported format of file {}", file.name)),
             }
         }
     }
