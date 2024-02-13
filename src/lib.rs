@@ -5,6 +5,8 @@ use anyhow::anyhow;
 struct OptStack {
     /// --as-needed
     pub as_needed: bool,
+    /// -static
+    pub link_static: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -12,6 +14,8 @@ pub struct LibraryOpt {
     pub name: String,
     /// --as-needed
     pub as_needed: bool,
+    /// -static
+    pub link_static: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -20,6 +24,10 @@ pub enum ObjFileOpt {
     File(String),
     /// -l namespec
     Library(LibraryOpt),
+    /// --start-group
+    StartGroup,
+    /// --end-group
+    EndGroup,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -45,7 +53,10 @@ pub struct Opt {
 /// parse arguments
 pub fn parse_opts(args: &Vec<String>) -> anyhow::Result<Opt> {
     let mut opt = Opt::default();
-    let mut cur_opt_stack = OptStack { as_needed: false };
+    let mut cur_opt_stack = OptStack {
+        as_needed: false,
+        link_static: false,
+    };
     let mut opt_stack = vec![];
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -88,10 +99,20 @@ pub fn parse_opts(args: &Vec<String>) -> anyhow::Result<Opt> {
                 opt.obj_file.push(ObjFileOpt::Library(LibraryOpt {
                     name: s.strip_prefix("-l").unwrap().to_string(),
                     as_needed: cur_opt_stack.as_needed,
+                    link_static: cur_opt_stack.link_static,
                 }));
+            }
+            "--start-group" => {
+                opt.obj_file.push(ObjFileOpt::StartGroup);
+            }
+            "--end-group" => {
+                opt.obj_file.push(ObjFileOpt::EndGroup);
             }
             "-pie" => {
                 opt.pie = true;
+            }
+            "-static" => {
+                cur_opt_stack.link_static = true;
             }
             "--as-needed" => {
                 cur_opt_stack.as_needed = true;

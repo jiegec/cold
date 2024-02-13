@@ -8,7 +8,7 @@ fn main() -> anyhow::Result<()> {
     info!("launched with args: {:?}", args);
 
     // parse arguments
-    let opt = parse_opts(&args);
+    let opt = parse_opts(&args)?;
 
     info!("parsed options: {opt:?}");
     Ok(())
