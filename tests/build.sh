@@ -16,3 +16,8 @@ as helloworld2_asm2.s -o helloworld2_asm2.o
 ld helloworld2_asm1.o helloworld2_asm2.o -o helloworld2_asm
 
 readelf -a helloworld2_asm > helloworld2_asm.readelf
+
+# uname_asm
+as uname_asm.s -o uname_asm.o
+ld uname_asm.o -o uname_asm
+readelf -a uname_asm > uname_asm.readelf

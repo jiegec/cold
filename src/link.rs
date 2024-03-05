@@ -173,8 +173,9 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
                                 match relocation.target() {
                                     object::RelocationTarget::Symbol(symbol_id) => {
                                         let symbol = elf.symbol_by_index(symbol_id)?;
-                                        if let Some(section_index) = symbol.section_index() {
+                                        if symbol.kind() == object::SymbolKind::Section {
                                             // relocation to a section
+                                            let section_index = symbol.section_index().unwrap();
                                             let target_section =
                                                 elf.section_by_index(section_index)?;
                                             let target_section_name = target_section.name()?;
@@ -227,8 +228,9 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
                         }
                     }
 
-                    for symbol in elf.symbols() {
-                        if symbol.is_global() && !symbol.is_undefined() {
+                    // skip the first symbol which is null
+                    for symbol in elf.symbols().skip(1) {
+                        if !symbol.is_undefined() && symbol.kind() != object::SymbolKind::Section {
                             let name = symbol.name()?;
                             match symbol.section() {
                                 object::SymbolSection::Section(section_index) => {
