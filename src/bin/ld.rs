@@ -1,4 +1,4 @@
-use cold::{link, parse_opts};
+use cold::{link::link, opt::parse_opts};
 use log::info;
 
 fn main() -> anyhow::Result<()> {
