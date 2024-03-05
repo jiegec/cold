@@ -224,6 +224,7 @@ pub struct OutputSection {
     pub content: Vec<u8>,
     pub offset: u64,
     pub relocations: Vec<(u64, Relocation)>,
+    pub is_executable: bool,
     // indicies in output ELF
     pub section_index: Option<SectionIndex>,
     pub name_string_id: Option<StringId>,
@@ -288,7 +289,14 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
                                 .or_insert_with(OutputSection::default);
                             out.name = name.to_string();
                             out.content.extend(data);
-                            out.relocations = section.relocations().collect();
+                            out.relocations.extend(section.relocations());
+                            match section.flags() {
+                                object::SectionFlags::Elf { sh_flags } => {
+                                    out.is_executable |=
+                                        ((sh_flags as u32) & object::elf::SHF_EXECINSTR) != 0;
+                                }
+                                _ => unimplemented!(),
+                            }
                         }
                     }
 
@@ -396,14 +404,19 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
 
                     // write section headers
                     writer.write_null_section_header();
-                    for (_name, output_section) in &mut output_sections {
+                    for (name, output_section) in &mut output_sections {
+                        let mut flags = object::elf::SHF_ALLOC;
+                        if output_section.is_executable {
+                            flags |= object::elf::SHF_EXECINSTR;
+                        }
+
                         writer.write_section_header(&SectionHeader {
                             name: output_section.name_string_id,
                             sh_type: object::elf::SHT_PROGBITS,
-                            sh_flags: 0,
-                            sh_addr: 0,
-                            sh_offset: 0,
-                            sh_size: 0,
+                            sh_flags: flags as u64,
+                            sh_addr: section_address[name],
+                            sh_offset: output_section.offset,
+                            sh_size: output_section.content.len() as u64,
                             sh_link: 0,
                             sh_info: 0,
                             sh_addralign: 0,
