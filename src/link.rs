@@ -95,6 +95,7 @@ pub struct OutputSection {
     // relocations in this section
     pub relocations: Vec<Relocation>,
     pub is_executable: bool,
+    pub is_writable: bool,
     // indices in output ELF
     pub section_index: Option<SectionIndex>,
     pub name_string_id: Option<StringId>,
@@ -180,7 +181,7 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
                                                 elf.section_by_index(section_index)?;
                                             let target_section_name = target_section.name()?;
                                             info!(
-                                                "Found relocation target to section {}",
+                                                "Found relocation targeting section {}",
                                                 target_section_name
                                             );
 
@@ -200,7 +201,7 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
                                             // relocation to a symbol
                                             let symbol_name = symbol.name()?;
                                             info!(
-                                                "Found relocation target to symbol {}",
+                                                "Found relocation targeting symbol {}",
                                                 symbol_name
                                             );
 
@@ -222,6 +223,8 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
                                 object::SectionFlags::Elf { sh_flags } => {
                                     out.is_executable |=
                                         ((sh_flags as u32) & object::elf::SHF_EXECINSTR) != 0;
+                                    out.is_writable |=
+                                        ((sh_flags as u32) & object::elf::SHF_WRITE) != 0;
                                 }
                                 _ => unimplemented!(),
                             }
@@ -318,11 +321,11 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
             info!("Handling relocation {:?} from section {}", relocation, name);
             let target_address = match &relocation.target {
                 RelocationTarget::Section((name, offset)) => {
-                    info!("Handling relocation target to section {}", name);
+                    info!("Handling relocation targeting section {}", name);
                     section_address[name] + offset
                 }
                 RelocationTarget::Symbol(name) => {
-                    info!("Handling relocation target to symbol {}", name);
+                    info!("Handling relocation targeting symbol {}", name);
                     let symbol = &symbols[name];
                     section_address[&symbol.section_name] + symbol.offset
                 }
@@ -335,7 +338,7 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
             ) {
                 // R_X86_64_32S
                 (object::RelocationKind::Absolute, object::RelocationEncoding::X86Signed, 32) => {
-                    info!("Handling relocation R_X86_64_32S");
+                    info!("Handling relocation type R_X86_64_32S");
                     // S + A
                     let value = target_address as i64 + relocation.inner.addend();
                     output_section.content
@@ -344,7 +347,7 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
                 }
                 // R_X86_64_PLT32
                 (object::RelocationKind::PltRelative, object::RelocationEncoding::Generic, 32) => {
-                    info!("Handling relocation R_X86_64_PLT32");
+                    info!("Handling relocation type R_X86_64_PLT32");
                     // we don't have PLT now, implement as R_X86_64_PC32
                     // S + A - P
                     let mut value = target_address as i64 + relocation.inner.addend();
@@ -399,6 +402,9 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
         let mut flags = object::elf::SHF_ALLOC;
         if output_section.is_executable {
             flags |= object::elf::SHF_EXECINSTR;
+        }
+        if output_section.is_writable {
+            flags |= object::elf::SHF_WRITE;
         }
 
         writer.write_section_header(&SectionHeader {
