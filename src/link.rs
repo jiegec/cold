@@ -358,14 +358,18 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
     }
 
     // all set! we can now write actual data to buffer
+    // compute entrypoint address
+    let entry_symbol = &symbols["_start"];
+    let entry_address = section_address[&entry_symbol.section_name] + entry_symbol.offset;
+
     // ELF header
     writer.write_file_header(&FileHeader {
         os_abi: 0,
         abi_version: 0,
         e_type: object::elf::ET_EXEC,
         e_machine: object::elf::EM_X86_64,
-        // assume that entrypoint is at the beginning of .text section for now
-        e_entry: section_address[".text"],
+        // assume that entrypoint is pointed at _start
+        e_entry: entry_address,
         e_flags: 0,
     })?;
     // program header
@@ -404,7 +408,7 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
             sh_size: output_section.content.len() as u64,
             sh_link: 0,
             sh_info: 0,
-            sh_addralign: 0,
+            sh_addralign: 1,
             sh_entsize: 0,
         });
     }
