@@ -65,6 +65,8 @@ pub struct ObjectFile {
 pub enum RelocationTarget {
     // relocation against section with additional offset
     Section((String, u64)),
+    // relocation against symbol
+    Symbol(String),
 }
 
 #[derive(Debug)]
@@ -118,6 +120,9 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
     // section name => section
     let mut output_sections: BTreeMap<String, OutputSection> = BTreeMap::new();
 
+    // symbol table: symbol name => section name, offset
+    let mut symbols: BTreeMap<String, (String, u64)> = BTreeMap::new();
+
     // parse files and resolve symbols
     for file in &files {
         info!("Parsing {}", file.name);
@@ -159,20 +164,45 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
                                 match relocation.target() {
                                     object::RelocationTarget::Symbol(symbol_id) => {
                                         let symbol = elf.symbol_by_index(symbol_id)?;
-                                        let section_id = symbol.section_index().unwrap();
-                                        let section = elf.section_by_index(section_id)?;
-                                        let name = section.name()?;
-                                        info!("Found relocation target to section {}", name);
+                                        if let Some(section_index) = symbol.section_index() {
+                                            // relocation to a section
+                                            let target_section =
+                                                elf.section_by_index(section_index)?;
+                                            let target_section_name = target_section.name()?;
+                                            info!(
+                                                "Found relocation target to section {}",
+                                                target_section_name
+                                            );
 
-                                        out.relocations.push(Relocation {
-                                            offset,
-                                            inner: relocation,
-                                            target: RelocationTarget::Section((
-                                                name.to_string(),
-                                                // record current size of section, because there can be existing content in the section from other object file
-                                                *section_sizes.get(name).unwrap_or(&0),
-                                            )),
-                                        });
+                                            out.relocations.push(Relocation {
+                                                offset: offset
+                                                    + *section_sizes.get(name).unwrap_or(&0),
+                                                inner: relocation,
+                                                target: RelocationTarget::Section((
+                                                    target_section_name.to_string(),
+                                                    // record current size of section, because there can be existing content in the section from other object file
+                                                    *section_sizes
+                                                        .get(target_section_name)
+                                                        .unwrap_or(&0),
+                                                )),
+                                            });
+                                        } else {
+                                            // relocation to a symbol
+                                            let symbol_name = symbol.name()?;
+                                            info!(
+                                                "Found relocation target to symbol {}",
+                                                symbol_name
+                                            );
+
+                                            out.relocations.push(Relocation {
+                                                offset: offset
+                                                    + *section_sizes.get(name).unwrap_or(&0),
+                                                inner: relocation,
+                                                target: RelocationTarget::Symbol(
+                                                    symbol_name.to_string(),
+                                                ),
+                                            });
+                                        }
                                     }
                                     _ => unimplemented!(),
                                 };
@@ -182,6 +212,27 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
                                 object::SectionFlags::Elf { sh_flags } => {
                                     out.is_executable |=
                                         ((sh_flags as u32) & object::elf::SHF_EXECINSTR) != 0;
+                                }
+                                _ => unimplemented!(),
+                            }
+                        }
+                    }
+
+                    for symbol in elf.symbols() {
+                        if symbol.is_global() && !symbol.is_undefined() {
+                            let name = symbol.name()?;
+                            match symbol.section() {
+                                object::SymbolSection::Section(section_index) => {
+                                    let section = elf.section_by_index(section_index)?;
+                                    let section_name = section.name()?;
+                                    info!("Defining symbol {} from section {}", name, section_name);
+                                    // offset: consider existing section content from other files
+                                    let offset = symbol.address()
+                                        + section_sizes.get(section_name).unwrap_or(&0);
+                                    symbols.insert(
+                                        name.to_string(),
+                                        (section_name.to_string(), offset),
+                                    );
                                 }
                                 _ => unimplemented!(),
                             }
@@ -241,7 +292,13 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
                     info!("Handling relocation target to section {}", name);
                     section_address[name] + offset
                 }
+                RelocationTarget::Symbol(name) => {
+                    info!("Handling relocation target to symbol {}", name);
+                    let (section_name, offset) = &symbols[name];
+                    section_address[section_name] + offset
+                }
             };
+
             match (
                 relocation.inner.kind(),
                 relocation.inner.encoding(),
@@ -250,11 +307,25 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
                 // R_X86_64_32S
                 (object::RelocationKind::Absolute, object::RelocationEncoding::X86Signed, 32) => {
                     info!("Handling relocation R_X86_64_32S");
+                    // S + A
+                    let value = target_address as i64 + relocation.inner.addend();
                     output_section.content
                         [(relocation.offset) as usize..(relocation.offset + 4) as usize]
-                        .copy_from_slice(&(target_address as i32).to_le_bytes());
+                        .copy_from_slice(&(value as i32).to_le_bytes());
                 }
-                _ => unimplemented!(),
+                // R_X86_64_PLT32
+                (object::RelocationKind::PltRelative, object::RelocationEncoding::Generic, 32) => {
+                    info!("Handling relocation R_X86_64_PLT32");
+                    // we don't have PLT now, implement as R_X86_64_PC32
+                    // S + A - P
+                    let mut value = target_address as i64 + relocation.inner.addend();
+                    value -= (load_address + output_section.offset + relocation.offset) as i64;
+
+                    output_section.content
+                        [(relocation.offset) as usize..(relocation.offset + 4) as usize]
+                        .copy_from_slice(&(value as i32).to_le_bytes());
+                }
+                _ => unimplemented!("Unimplemented relocation {:?}", relocation),
             }
         }
     }
