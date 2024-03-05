@@ -5,7 +5,7 @@ use object::{
     write::{elf::SectionIndex, StringId},
     Object, ObjectSection, ObjectSymbol, Relocation,
 };
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, os::unix::fs::PermissionsExt, path::PathBuf};
 use typed_arena::Arena;
 
 fn lookup_file(name: &str, paths: &Vec<String>) -> anyhow::Result<PathBuf> {
@@ -271,8 +271,14 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
                     writer.write_shstrtab();
 
                     // done, save to file
-                    info!("Writing to executable {:?}", opt.output.clone());
-                    std::fs::write(opt.output.clone().unwrap(), buffer)?;
+                    let output = opt.output.as_ref().unwrap();
+                    info!("Writing to executable {:?}", output);
+                    std::fs::write(output, buffer)?;
+
+                    // make executable
+                    let mut perms = std::fs::metadata(output)?.permissions();
+                    perms.set_mode(0o755);
+                    std::fs::set_permissions(output, perms)?;
                 }
                 _ => return Err(anyhow!("Unsupported format of file {}", file.name)),
             }
