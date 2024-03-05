@@ -2,4 +2,4 @@
 !.gitignore
 !*.sh
 !*_c.c
-!*_asm.s
+!*_asm*.s
