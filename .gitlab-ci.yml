@@ -1,0 +1,7 @@
+test:
+  image: rust:latest
+  script:
+    - apt update
+    - apt install -y build-essential
+    - cargo test
+    - cd tests && ./test.sh
