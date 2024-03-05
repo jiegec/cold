@@ -77,6 +77,15 @@ pub struct Relocation {
     target: RelocationTarget,
 }
 
+#[derive(Debug)]
+pub struct Symbol {
+    section_name: String,
+    // offset into the output section
+    offset: u64,
+    // indices in output ELF
+    symbol_name_string_id: Option<StringId>,
+}
+
 #[derive(Default, Debug)]
 pub struct OutputSection {
     pub name: String,
@@ -86,7 +95,7 @@ pub struct OutputSection {
     // relocations in this section
     pub relocations: Vec<Relocation>,
     pub is_executable: bool,
-    // indicies in output ELF
+    // indices in output ELF
     pub section_index: Option<SectionIndex>,
     pub name_string_id: Option<StringId>,
 }
@@ -120,8 +129,8 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
     // section name => section
     let mut output_sections: BTreeMap<String, OutputSection> = BTreeMap::new();
 
-    // symbol table: symbol name => section name, offset
-    let mut symbols: BTreeMap<String, (String, u64)> = BTreeMap::new();
+    // symbol table: symbol name => symbol
+    let mut symbols: BTreeMap<String, Symbol> = BTreeMap::new();
 
     // parse files and resolve symbols
     for file in &files {
@@ -231,7 +240,11 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
                                         + section_sizes.get(section_name).unwrap_or(&0);
                                     symbols.insert(
                                         name.to_string(),
-                                        (section_name.to_string(), offset),
+                                        Symbol {
+                                            section_name: section_name.to_string(),
+                                            offset: offset,
+                                            symbol_name_string_id: None,
+                                        },
                                     );
                                 }
                                 _ => unimplemented!(),
@@ -264,7 +277,7 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
     }
     info!("Output sections: {:?}", output_sections);
 
-    // reserve section headers and section header string table
+    // reserve section headers
     writer.reserve_null_section_index();
     // use typed-arena to avoid borrow to `output_sections`
     let arena: Arena<u8> = Arena::new();
@@ -273,8 +286,22 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
             Some(writer.add_section_name(arena.alloc_str(&name).as_bytes()));
         output_section.section_index = Some(writer.reserve_section_index());
     }
+    let _symtab_section_index = writer.reserve_symtab_section_index();
+    let _strtab_section_index = writer.reserve_strtab_section_index();
     let _shstrtab_section_index = writer.reserve_shstrtab_section_index();
     writer.reserve_section_headers();
+
+    // prepare symbol table
+    writer.reserve_null_symbol_index();
+    for (symbol_name, symbol) in &mut symbols {
+        symbol.symbol_name_string_id =
+            Some(writer.add_string(arena.alloc_str(&symbol_name).as_bytes()));
+        writer.reserve_symbol_index(None);
+    }
+
+    // reserve symtab, strtab and shstrtab
+    writer.reserve_symtab();
+    writer.reserve_strtab();
     writer.reserve_shstrtab();
 
     // compute mapping from section name to virtual address
@@ -294,8 +321,8 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
                 }
                 RelocationTarget::Symbol(name) => {
                     info!("Handling relocation target to symbol {}", name);
-                    let (section_name, offset) = &symbols[name];
-                    section_address[section_name] + offset
+                    let symbol = &symbols[name];
+                    section_address[&symbol.section_name] + symbol.offset
                 }
             };
 
@@ -381,7 +408,27 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
             sh_entsize: 0,
         });
     }
+    writer.write_symtab_section_header(1); // one local: null symbol
+    writer.write_strtab_section_header();
     writer.write_shstrtab_section_header();
+
+    // write symbol table
+    writer.write_null_symbol();
+    for (_symbol_name, symbol) in &symbols {
+        let address = section_address[&symbol.section_name] + symbol.offset;
+        writer.write_symbol(&Sym {
+            name: symbol.symbol_name_string_id,
+            section: output_sections[&symbol.section_name].section_index,
+            st_info: (object::elf::STB_GLOBAL) << 4,
+            st_other: 0,
+            st_shndx: 0,
+            st_value: address,
+            st_size: 0,
+        });
+    }
+
+    // write string table
+    writer.write_strtab();
 
     // write section string table
     writer.write_shstrtab();

@@ -1,5 +1,5 @@
 #!/bin/bash
-set -x
+set -x -e
 ./build.sh
 
 RUST_LOG=info cargo run -- helloworld_asm.o -o helloworld_asm_cold
