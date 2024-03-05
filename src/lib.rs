@@ -328,21 +328,23 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
                     writer.write_file_header(&FileHeader {
                         os_abi: 0,
                         abi_version: 0,
-                        e_type: 0,
-                        e_machine: 0,
-                        e_entry: 0,
+                        e_type: object::elf::ET_EXEC,
+                        e_machine: object::elf::EM_X86_64,
+                        // assume that entrypoint is at the beginning of .text section for now
+                        e_entry: (output_sections[".text"].offset + load_address) as u64,
                         e_flags: 0,
                     })?;
                     // program header
+                    // ask kernel to load whole file into memory
                     writer.write_program_header(&ProgramHeader {
-                        p_type: 0,
-                        p_flags: 0,
+                        p_type: object::elf::PT_LOAD,
+                        p_flags: object::elf::PF_X | object::elf::PF_W | object::elf::PF_R,
                         p_offset: 0,
-                        p_vaddr: 0,
-                        p_paddr: 0,
-                        p_filesz: 0,
-                        p_memsz: 0,
-                        p_align: 0,
+                        p_vaddr: load_address as u64,
+                        p_paddr: load_address as u64,
+                        p_filesz: writer.reserved_len() as u64,
+                        p_memsz: writer.reserved_len() as u64,
+                        p_align: 4096,
                     });
 
                     // write section data
@@ -356,7 +358,7 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
                     for (_name, output_section) in &mut output_sections {
                         writer.write_section_header(&SectionHeader {
                             name: output_section.name_string_id,
-                            sh_type: 0,
+                            sh_type: object::elf::SHT_PROGBITS,
                             sh_flags: 0,
                             sh_addr: 0,
                             sh_offset: 0,
