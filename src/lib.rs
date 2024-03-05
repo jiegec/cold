@@ -1,7 +1,11 @@
 use anyhow::{anyhow, Context};
 use log::{info, warn};
-use object::{Object, ObjectSection};
-use std::path::PathBuf;
+use object::{
+    write::{elf::SectionIndex, StringId},
+    Object, ObjectSection,
+};
+use std::{collections::BTreeMap, path::PathBuf};
+use typed_arena::Arena;
 
 /// handle --push-state/--pop-state
 #[derive(Debug, Copy, Clone)]
@@ -29,8 +33,8 @@ pub struct LibraryOpt {
 }
 
 #[derive(Debug, Clone)]
-pub enum ObjFileOpt {
-    /// objfile
+pub enum ObjectFileOpt {
+    /// ObjectFile
     File(FileOpt),
     /// -l namespec
     Library(LibraryOpt),
@@ -56,8 +60,8 @@ pub struct Opt {
     pub dynamic_linker: Option<String>,
     /// -L searchdir
     pub search_dir: Vec<String>,
-    /// objfile
-    pub obj_file: Vec<ObjFileOpt>,
+    /// ObjectFile
+    pub obj_file: Vec<ObjectFileOpt>,
 }
 
 /// parse arguments
@@ -87,7 +91,7 @@ pub fn parse_opts(args: &Vec<String>) -> anyhow::Result<Opt> {
             }
             s @ _ if s.starts_with("-l") => {
                 // library argument
-                opt.obj_file.push(ObjFileOpt::Library(LibraryOpt {
+                opt.obj_file.push(ObjectFileOpt::Library(LibraryOpt {
                     name: s.strip_prefix("-l").unwrap().to_string(),
                     as_needed: cur_opt_stack.as_needed,
                     link_static: cur_opt_stack.link_static,
@@ -134,10 +138,10 @@ pub fn parse_opts(args: &Vec<String>) -> anyhow::Result<Opt> {
                 opt.eh_frame_hdr = true;
             }
             "--end-group" => {
-                opt.obj_file.push(ObjFileOpt::EndGroup);
+                opt.obj_file.push(ObjectFileOpt::EndGroup);
             }
             "--start-group" => {
-                opt.obj_file.push(ObjFileOpt::StartGroup);
+                opt.obj_file.push(ObjectFileOpt::StartGroup);
             }
             "--pop-state" => {
                 cur_opt_stack = opt_stack.pop().unwrap();
@@ -152,7 +156,7 @@ pub fn parse_opts(args: &Vec<String>) -> anyhow::Result<Opt> {
             }
             s @ _ => {
                 // object file argument
-                opt.obj_file.push(ObjFileOpt::File(FileOpt {
+                opt.obj_file.push(ObjectFileOpt::File(FileOpt {
                     name: s.to_string(),
                     as_needed: cur_opt_stack.as_needed,
                 }));
@@ -179,13 +183,13 @@ pub fn path_resolution(opt: &Opt) -> anyhow::Result<Opt> {
     // resolve library to actual files
     let mut opt = opt.clone();
     for obj_file in &mut opt.obj_file {
-        // convert ObjFileOpt::Library to ObjFileOpt::File
-        if let ObjFileOpt::Library(lib) = obj_file {
+        // convert ObjectFileOpt::Library to ObjectFileOpt::File
+        if let ObjectFileOpt::Library(lib) = obj_file {
             if !lib.link_static {
                 // lookup dynamic library first
                 let path = format!("lib{}.so", lib.name);
                 if let Ok(path) = lookup_file(&path, &opt.search_dir) {
-                    *obj_file = ObjFileOpt::File(FileOpt {
+                    *obj_file = ObjectFileOpt::File(FileOpt {
                         name: format!("{}", path.display()),
                         as_needed: lib.as_needed,
                     });
@@ -196,7 +200,7 @@ pub fn path_resolution(opt: &Opt) -> anyhow::Result<Opt> {
             // lookup static library
             let path = format!("lib{}.a", lib.name);
             let path = lookup_file(&path, &opt.search_dir)?;
-            *obj_file = ObjFileOpt::File(FileOpt {
+            *obj_file = ObjectFileOpt::File(FileOpt {
                 name: format!("{}", path.display()),
                 as_needed: lib.as_needed,
             });
@@ -207,11 +211,21 @@ pub fn path_resolution(opt: &Opt) -> anyhow::Result<Opt> {
 }
 
 #[derive(Debug, Clone)]
-pub struct ObjFile {
+pub struct ObjectFile {
     pub name: String,
     /// --as-needed
     pub as_needed: bool,
     pub content: Vec<u8>,
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct OutputSection {
+    pub name: String,
+    pub content: Vec<u8>,
+    pub offset: usize,
+    // ELF
+    pub section_index: Option<SectionIndex>,
+    pub name_string_id: Option<StringId>,
 }
 
 /// Do the actual linking
@@ -225,18 +239,18 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
     let mut files = vec![];
     for obj_file in &opt.obj_file {
         match obj_file {
-            ObjFileOpt::File(file_opt) => {
+            ObjectFileOpt::File(file_opt) => {
                 info!("Reading {}", file_opt.name);
-                files.push(ObjFile {
+                files.push(ObjectFile {
                     name: file_opt.name.clone(),
                     as_needed: file_opt.as_needed,
                     content: std::fs::read(&file_opt.name)
                         .context(format!("Reading file {}", file_opt.name))?,
                 });
             }
-            ObjFileOpt::Library(_) => unreachable!("Path resolution is not working"),
-            ObjFileOpt::StartGroup => warn!("--start-group unhandled"),
-            ObjFileOpt::EndGroup => warn!("--end-group unhandled"),
+            ObjectFileOpt::Library(_) => unreachable!("Path resolution is not working"),
+            ObjectFileOpt::StartGroup => warn!("--start-group unhandled"),
+            ObjectFileOpt::EndGroup => warn!("--end-group unhandled"),
         }
     }
 
@@ -253,9 +267,113 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
                 .context(format!("Parsing file {} as object", file.name))?;
             match obj {
                 object::File::Elf64(elf) => {
+                    // section name => section
+                    let mut output_sections: BTreeMap<String, OutputSection> = BTreeMap::new();
                     for section in elf.sections() {
-                        info!("Handling section {}", section.name()?);
+                        let name = section.name()?;
+                        info!("Handling section {}", name);
+                        let data = section.data()?;
+                        if data.is_empty() {
+                            continue;
+                        }
+
+                        if ![".symtab", ".strtab", ".shstrtab"].contains(&name)
+                            && !name.starts_with(".rela")
+                            && !name.is_empty()
+                        {
+                            // copy to output
+                            let out = output_sections
+                                .entry(name.to_string())
+                                .or_insert_with(OutputSection::default);
+                            out.name = name.to_string();
+                            out.content.extend(data);
+                        }
                     }
+
+                    // create executable ELF
+                    use object::write::elf::*;
+                    let mut buffer = vec![];
+                    let mut writer = Writer::new(object::Endianness::Little, true, &mut buffer);
+
+                    // assign address to output sections
+                    // and generate layout of executable
+                    // assume executable is loaded at 0x400000
+                    // the first page is reserved for ELF header & program header
+                    writer.reserve_file_header();
+                    // for simplicity, use one segment to map them all
+                    writer.reserve_program_headers(1);
+
+                    // thus sections begin at 0x401000
+                    let load_address = 0x400000;
+                    for (_name, output_section) in &mut output_sections {
+                        output_section.offset = writer.reserve(output_section.content.len(), 4096);
+                    }
+                    info!("Output sections: {:?}", output_sections);
+
+                    // reserve section headers and section header string table
+                    writer.reserve_null_section_index();
+                    // use typed-arena to avoid borrow to `output_sections`
+                    let arena: Arena<u8> = Arena::new();
+                    for (name, output_section) in &mut output_sections {
+                        output_section.name_string_id =
+                            Some(writer.add_section_name(arena.alloc_str(&name).as_bytes()));
+                        output_section.section_index = Some(writer.reserve_section_index());
+                    }
+                    let shstrtab_section_index = writer.reserve_shstrtab_section_index();
+                    writer.reserve_section_headers();
+                    writer.reserve_shstrtab();
+
+                    // all set! we can now write actual data to buffer
+                    // ELF header
+                    writer.write_file_header(&FileHeader {
+                        os_abi: 0,
+                        abi_version: 0,
+                        e_type: 0,
+                        e_machine: 0,
+                        e_entry: 0,
+                        e_flags: 0,
+                    })?;
+                    // program header
+                    writer.write_program_header(&ProgramHeader {
+                        p_type: 0,
+                        p_flags: 0,
+                        p_offset: 0,
+                        p_vaddr: 0,
+                        p_paddr: 0,
+                        p_filesz: 0,
+                        p_memsz: 0,
+                        p_align: 0,
+                    });
+
+                    // write section data
+                    for (_name, output_section) in &mut output_sections {
+                        writer.pad_until(output_section.offset);
+                        writer.write(&output_section.content);
+                    }
+
+                    // write section headers
+                    writer.write_null_section_header();
+                    for (_name, output_section) in &mut output_sections {
+                        writer.write_section_header(&SectionHeader {
+                            name: output_section.name_string_id,
+                            sh_type: 0,
+                            sh_flags: 0,
+                            sh_addr: 0,
+                            sh_offset: 0,
+                            sh_size: 0,
+                            sh_link: 0,
+                            sh_info: 0,
+                            sh_addralign: 0,
+                            sh_entsize: 0,
+                        });
+                    }
+                    writer.write_shstrtab_section_header();
+
+                    // write section string table
+                    writer.write_shstrtab();
+
+                    // done, save to file
+                    std::fs::write(opt.output.clone().unwrap(), buffer)?;
                 }
                 _ => return Err(anyhow!("Unsupported format of file {}", file.name)),
             }
@@ -281,21 +399,21 @@ mod tests {
         .unwrap();
 
         assert_eq!(opts.obj_file.len(), 3);
-        if let ObjFileOpt::Library(lib) = &opts.obj_file[0] {
+        if let ObjectFileOpt::Library(lib) = &opts.obj_file[0] {
             assert_eq!(lib.name, "a");
             assert_eq!(lib.as_needed, false);
         } else {
             assert!(false);
         }
 
-        if let ObjFileOpt::Library(lib) = &opts.obj_file[1] {
+        if let ObjectFileOpt::Library(lib) = &opts.obj_file[1] {
             assert_eq!(lib.name, "b");
             assert_eq!(lib.as_needed, true);
         } else {
             assert!(false);
         }
 
-        if let ObjFileOpt::Library(lib) = &opts.obj_file[2] {
+        if let ObjectFileOpt::Library(lib) = &opts.obj_file[2] {
             assert_eq!(lib.name, "c");
             assert_eq!(lib.as_needed, false);
         } else {
