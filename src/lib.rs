@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context};
 use log::{info, warn};
 use object::{
     write::{elf::SectionIndex, StringId},
-    Object, ObjectSection,
+    Object, ObjectSection, ObjectSymbol, Relocation,
 };
 use std::{collections::BTreeMap, path::PathBuf};
 use typed_arena::Arena;
@@ -218,12 +218,13 @@ pub struct ObjectFile {
     pub content: Vec<u8>,
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug)]
 pub struct OutputSection {
     pub name: String,
     pub content: Vec<u8>,
-    pub offset: usize,
-    // ELF
+    pub offset: u64,
+    pub relocations: Vec<(u64, Relocation)>,
+    // indicies in output ELF
     pub section_index: Option<SectionIndex>,
     pub name_string_id: Option<StringId>,
 }
@@ -287,6 +288,7 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
                                 .or_insert_with(OutputSection::default);
                             out.name = name.to_string();
                             out.content.extend(data);
+                            out.relocations = section.relocations().collect();
                         }
                     }
 
@@ -306,7 +308,8 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
                     // thus sections begin at 0x401000
                     let load_address = 0x400000;
                     for (_name, output_section) in &mut output_sections {
-                        output_section.offset = writer.reserve(output_section.content.len(), 4096);
+                        output_section.offset =
+                            writer.reserve(output_section.content.len(), 4096) as u64;
                     }
                     info!("Output sections: {:?}", output_sections);
 
@@ -323,6 +326,44 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
                     writer.reserve_section_headers();
                     writer.reserve_shstrtab();
 
+                    // compute mapping from section name to virtual address
+                    let mut section_address: BTreeMap<String, u64> = BTreeMap::new();
+                    for (name, output_section) in &mut output_sections {
+                        section_address.insert(name.clone(), output_section.offset + load_address);
+                    }
+
+                    // compute relocation
+                    for (name, output_section) in &mut output_sections {
+                        for (offset, relocation) in &output_section.relocations {
+                            info!("Handling relocation {:?} from section {}", relocation, name);
+                            let target_address = match relocation.target() {
+                                object::RelocationTarget::Symbol(symbol_id) => {
+                                    let symbol = elf.symbol_by_index(symbol_id)?;
+                                    let section_id = symbol.section_index().unwrap();
+                                    let section = elf.section_by_index(section_id)?;
+                                    let name = section.name()?;
+                                    info!("Found relocation target to section {}", name);
+                                    section_address[name]
+                                }
+                                _ => unimplemented!(),
+                            };
+                            match (relocation.kind(), relocation.encoding(), relocation.size()) {
+                                // R_X86_64_32S
+                                (
+                                    object::RelocationKind::Absolute,
+                                    object::RelocationEncoding::X86Signed,
+                                    32,
+                                ) => {
+                                    info!("Handling relocation R_X86_64_32S");
+                                    output_section.content
+                                        [(*offset) as usize..(*offset + 4) as usize]
+                                        .copy_from_slice(&(target_address as i32).to_le_bytes());
+                                }
+                                _ => unimplemented!(),
+                            }
+                        }
+                    }
+
                     // all set! we can now write actual data to buffer
                     // ELF header
                     writer.write_file_header(&FileHeader {
@@ -331,7 +372,7 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
                         e_type: object::elf::ET_EXEC,
                         e_machine: object::elf::EM_X86_64,
                         // assume that entrypoint is at the beginning of .text section for now
-                        e_entry: (output_sections[".text"].offset + load_address) as u64,
+                        e_entry: section_address[".text"],
                         e_flags: 0,
                     })?;
                     // program header
@@ -349,7 +390,7 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
 
                     // write section data
                     for (_name, output_section) in &mut output_sections {
-                        writer.pad_until(output_section.offset);
+                        writer.pad_until(output_section.offset as usize);
                         writer.write(&output_section.content);
                     }
 
@@ -375,6 +416,7 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
                     writer.write_shstrtab();
 
                     // done, save to file
+                    info!("Writing to executable {:?}", opt.output.clone());
                     std::fs::write(opt.output.clone().unwrap(), buffer)?;
                 }
                 _ => return Err(anyhow!("Unsupported format of file {}", file.name)),
