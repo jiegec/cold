@@ -9,6 +9,8 @@ readelf -a helloworld_asm > helloworld_asm.readelf
 
 # helloworld_c
 gcc helloworld_c.c -o helloworld_c -v --save-temps
+gcc -static helloworld_c.c -o helloworld_c_static -v --save-temps
+gcc -static-pie helloworld_c.c -o helloworld_c_static_pie -v --save-temps
 
 # helloworld2_asm
 as helloworld2_asm1.s -o helloworld2_asm1.o
