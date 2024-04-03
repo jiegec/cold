@@ -37,6 +37,21 @@ pub enum ObjectFileOpt {
     EndGroup,
 }
 
+#[derive(Debug, Clone)]
+pub struct HashStyle {
+    pub sysv: bool,
+    pub gnu: bool,
+}
+
+impl Default for HashStyle {
+    fn default() -> Self {
+        Self {
+            sysv: true,
+            gnu: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Opt {
     /// --build-id
@@ -55,6 +70,8 @@ pub struct Opt {
     pub dynamic_linker: Option<String>,
     /// -L searchdir
     pub search_dir: Vec<String>,
+    /// --hash-style=sysv/gnu/both
+    pub hash_style: HashStyle,
     /// ObjectFile
     pub obj_file: Vec<ObjectFileOpt>,
 }
@@ -138,6 +155,21 @@ pub fn parse_opts(args: &Vec<String>) -> anyhow::Result<Opt> {
             "--end-group" => {
                 opt.obj_file.push(ObjectFileOpt::EndGroup);
             }
+            s @ _ if s.starts_with("--hash-style=") => match s {
+                "--hash-style=sysv" => {
+                    opt.hash_style.sysv = true;
+                    opt.hash_style.gnu = false;
+                }
+                "--hash-style=gnu" => {
+                    opt.hash_style.sysv = false;
+                    opt.hash_style.gnu = true;
+                }
+                "--hash-style=both" => {
+                    opt.hash_style.sysv = true;
+                    opt.hash_style.gnu = true;
+                }
+                _ => {}
+            },
             "--start-group" => {
                 opt.obj_file.push(ObjectFileOpt::StartGroup);
             }

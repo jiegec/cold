@@ -318,8 +318,12 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
         let _dynamic_section_index = writer.reserve_dynamic_section_index();
         let _dynsym_section_index = writer.reserve_dynsym_section_index();
         let _dynstr_section_index = writer.reserve_dynstr_section_index();
-        let _hash_section_index = writer.reserve_hash_section_index();
-        let _gnu_hash_section_index = writer.reserve_gnu_hash_section_index();
+        if opt.hash_style.sysv {
+            let _hash_section_index = writer.reserve_hash_section_index();
+        }
+        if opt.hash_style.gnu {
+            let _gnu_hash_section_index = writer.reserve_gnu_hash_section_index();
+        }
     }
     writer.reserve_section_headers();
 
@@ -337,7 +341,13 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
     writer.reserve_shstrtab();
 
     // reserve dynamic, dynsym, dynstr, hash and gnu_hash
-    const DYNAMIC_ENTRIES_COUNT: usize = 7;
+    let mut dynamic_entries_count: usize = 5;
+    if opt.hash_style.sysv {
+        dynamic_entries_count += 1;
+    }
+    if opt.hash_style.gnu {
+        dynamic_entries_count += 1;
+    }
     let (
         dynamic_section_offset,
         dynsym_section_offset,
@@ -345,7 +355,7 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
         hash_section_offset,
         gnu_hash_section_offset,
     ) = if opt.shared {
-        // 7 entries:
+        // at most 7 entries:
         // 1. HASH -> .hash
         // 2. GNU_HASH -> .gnu_hash
         // 3. STRTAB -> .dynstr
@@ -355,7 +365,7 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
         // 7. NULL
         // align to 8 bytes boundary
         let dynamic_section_offset = align(writer.reserved_len());
-        writer.reserve_dynamic(DYNAMIC_ENTRIES_COUNT);
+        writer.reserve_dynamic(dynamic_entries_count);
 
         // dynamic symbols
         writer.reserve_null_dynamic_symbol_index();
@@ -379,11 +389,16 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
 
         // hash table
         let hash_section_offset = align(writer.reserved_len());
-        writer.reserve_hash(dyn_symbols_count, dyn_symbols_count);
+        if opt.hash_style.sysv {
+            // chain count: 1 extra element for NULL symbol
+            writer.reserve_hash(dyn_symbols_count, dyn_symbols_count + 1);
+        }
 
         // gnu hash table
         let gnu_hash_section_offset = align(writer.reserved_len());
-        writer.reserve_gnu_hash(1, dyn_symbols_count, dyn_symbols_count);
+        if opt.hash_style.gnu {
+            writer.reserve_gnu_hash(1, dyn_symbols_count, dyn_symbols_count);
+        }
 
         (
             dynamic_section_offset,
@@ -508,10 +523,10 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
             p_offset: dynamic_section_offset as u64,
             p_vaddr: dynamic_section_offset as u64,
             p_paddr: dynamic_section_offset as u64,
-            p_filesz: (DYNAMIC_ENTRIES_COUNT
+            p_filesz: (dynamic_entries_count
                 * std::mem::size_of::<object::elf::Dyn64<object::LittleEndian>>())
                 as u64,
-            p_memsz: (DYNAMIC_ENTRIES_COUNT
+            p_memsz: (dynamic_entries_count
                 * std::mem::size_of::<object::elf::Dyn64<object::LittleEndian>>())
                 as u64,
             p_align: 8,
@@ -555,8 +570,12 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
         writer.write_dynamic_section_header(dynamic_section_offset as u64);
         writer.write_dynsym_section_header(dynsym_section_offset as u64, 1); // one local: null symbol
         writer.write_dynstr_section_header(dynstr_section_offset as u64);
-        writer.write_hash_section_header(hash_section_offset as u64);
-        writer.write_gnu_hash_section_header(gnu_hash_section_offset as u64);
+        if opt.hash_style.sysv {
+            writer.write_hash_section_header(hash_section_offset as u64);
+        }
+        if opt.hash_style.gnu {
+            writer.write_gnu_hash_section_header(gnu_hash_section_offset as u64);
+        }
     }
 
     // write symbol table
@@ -584,7 +603,7 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
     // shared library
     if opt.shared {
         // write dynamic table
-        // 7 entries:
+        // at most 7 entries:
         // 1. HASH -> .hash
         // 2. GNU_HASH -> .gnu_hash
         // 3. STRTAB -> .dynstr
@@ -593,8 +612,12 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
         // 6. SYMENT
         // 7. NULL
         writer.write_align_dynamic();
-        writer.write_dynamic(DT_HASH, hash_section_offset as u64);
-        writer.write_dynamic(DT_GNU_HASH, gnu_hash_section_offset as u64);
+        if opt.hash_style.sysv {
+            writer.write_dynamic(DT_HASH, hash_section_offset as u64);
+        }
+        if opt.hash_style.gnu {
+            writer.write_dynamic(DT_GNU_HASH, gnu_hash_section_offset as u64);
+        }
         writer.write_dynamic(DT_STRTAB, dynstr_section_offset as u64);
         writer.write_dynamic(DT_SYMTAB, dynsym_section_offset as u64);
         writer.write_dynamic(DT_STRSZ, 12); // entry size
@@ -633,23 +656,38 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
         writer.write_dynstr();
 
         // write hash table
-        writer.write_hash(dyn_symbols.len() as u32, dyn_symbols.len() as u32, |idx| {
-            // compute sysv hash of symbol name
-            Some(object::elf::hash(dyn_symbols[idx as usize].0.as_bytes()))
-        });
+        if opt.hash_style.sysv {
+            writer.write_hash(
+                dyn_symbols.len() as u32,
+                dyn_symbols.len() as u32 + 1, // + 1 for NULL symbol at start
+                |idx| {
+                    // compute sysv hash of symbol name
+                    // 0 is reserved for null, skip
+                    if idx == 0 {
+                        None
+                    } else {
+                        Some(object::elf::hash(
+                            dyn_symbols[idx as usize - 1].0.as_bytes(),
+                        ))
+                    }
+                },
+            );
+        }
 
         // write gnu hash table
-        writer.write_gnu_hash(
-            1, // must be at least one to skip the first NULL symbol
-            1,
-            1,
-            dyn_symbols.len() as u32,
-            dyn_symbols.len() as u32,
-            |idx| {
-                // compute gnu hash of symbol name
-                object::elf::gnu_hash(dyn_symbols[idx as usize].0.as_bytes())
-            },
-        );
+        if opt.hash_style.gnu {
+            writer.write_gnu_hash(
+                1, // must be at least one to skip the first NULL symbol
+                1,
+                1,
+                dyn_symbols.len() as u32,
+                dyn_symbols.len() as u32,
+                |idx| {
+                    // compute gnu hash of symbol name
+                    object::elf::gnu_hash(dyn_symbols[idx as usize].0.as_bytes())
+                },
+            );
+        }
     }
 
     // done, save to file
