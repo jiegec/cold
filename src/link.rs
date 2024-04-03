@@ -563,7 +563,9 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
             sh_entsize: 0,
         });
     }
-    writer.write_symtab_section_header(1); // one local: null symbol
+    writer.write_symtab_section_header(
+        1 + symbols.iter().filter(|(_name, sym)| !sym.is_global).count() as u32,
+    ); // +1: one extra null symbol at the beginning
     writer.write_strtab_section_header();
     writer.write_shstrtab_section_header();
     if opt.shared {
@@ -580,13 +582,19 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
 
     // write symbol table
     writer.write_null_symbol();
-    for (_symbol_name, symbol) in &symbols {
+    let mut symbols_vec: Vec<_> = symbols.iter().collect();
+    // local symbols first
+    symbols_vec.sort_by_key(|(_name, sym)| sym.is_global);
+    for (_symbol_name, symbol) in symbols_vec {
         let address = section_address[&symbol.section_name] + symbol.offset;
         writer.write_symbol(&Sym {
             name: symbol.symbol_name_string_id,
             section: output_sections[&symbol.section_name].section_index,
-            // TODO: handle local symbols and put them first
-            st_info: (object::elf::STB_GLOBAL) << 4,
+            st_info: if symbol.is_global {
+                (object::elf::STB_GLOBAL) << 4
+            } else {
+                (object::elf::STB_LOCAL) << 4
+            },
             st_other: 0,
             st_shndx: 0,
             st_value: address,

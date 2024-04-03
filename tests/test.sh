@@ -22,7 +22,9 @@ readelf -a helloworld2_asm_cold_rev > helloworld2_asm_cold_rev.readelf
 
 # helloworld3_asm
 RUST_LOG=info cargo run -- --hash-style=both -shared helloworld3_asm_library.o -o helloworld3_asm_library_cold.so
+readelf -a helloworld3_asm_library.so > helloworld3_asm_library.so.readelf
 ld -dynamic-linker /lib64/ld-linux-x86-64.so.2 helloworld3_asm_main.o helloworld3_asm_library_cold.so -o helloworld3_asm_cold
+readelf -a helloworld3_asm_cold > helloworld3_asm_cold.readelf
 export LD_LIBRARY_PATH=$PWD 
 ./helloworld3_asm_cold
 [[ $(./helloworld3_asm_cold) =~ "Hello world!" ]] || exit 1
