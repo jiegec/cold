@@ -36,6 +36,11 @@ RUST_LOG=info cargo run -- --hash-style=gnu -shared helloworld3_asm_library.o -o
 ld -dynamic-linker /lib64/ld-linux-x86-64.so.2 helloworld3_asm_main.o helloworld3_asm_library_cold.so -o helloworld3_asm_cold
 ./helloworld3_asm_cold
 [[ $(./helloworld3_asm_cold) =~ "Hello world!" ]] || exit 1
+RUST_LOG=info cargo run -- -soname test.so -shared helloworld3_asm_library.o -o helloworld3_asm_library_cold.so
+ld -dynamic-linker /lib64/ld-linux-x86-64.so.2 helloworld3_asm_main.o helloworld3_asm_library_cold.so -o helloworld3_asm_cold
+ln -sf helloworld3_asm_library_cold.so test.so
+./helloworld3_asm_cold
+[[ $(./helloworld3_asm_cold) =~ "Hello world!" ]] || exit 1
 
 # uname_asm
 RUST_LOG=info cargo run -- uname_asm.o -o uname_asm_cold

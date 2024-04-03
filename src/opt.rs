@@ -1,4 +1,4 @@
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 
 /// handle --push-state/--pop-state
 #[derive(Debug, Copy, Clone)]
@@ -72,6 +72,8 @@ pub struct Opt {
     pub search_dir: Vec<String>,
     /// --hash-style=sysv/gnu/both
     pub hash_style: HashStyle,
+    /// -soname SONAME
+    pub soname: Option<String>,
     /// ObjectFile
     pub obj_file: Vec<ObjectFileOpt>,
 }
@@ -138,6 +140,14 @@ pub fn parse_opts(args: &Vec<String>) -> anyhow::Result<Opt> {
             "-shared" => {
                 opt.shared = true;
             }
+            "-soname" => {
+                // soname argument
+                opt.soname = Some(
+                    iter.next()
+                        .ok_or(anyhow!("Missing file name after -soname"))?
+                        .to_string(),
+                );
+            }
             "-static" => {
                 cur_opt_stack.link_static = true;
             }
@@ -168,7 +178,9 @@ pub fn parse_opts(args: &Vec<String>) -> anyhow::Result<Opt> {
                     opt.hash_style.sysv = true;
                     opt.hash_style.gnu = true;
                 }
-                _ => {}
+                _ => {
+                    bail!("Invalid --hash-style option: {}", s)
+                }
             },
             "--start-group" => {
                 opt.obj_file.push(ObjectFileOpt::StartGroup);

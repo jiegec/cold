@@ -2,7 +2,7 @@ use crate::opt::{FileOpt, ObjectFileOpt, Opt};
 use anyhow::{anyhow, Context};
 use log::{info, warn};
 use object::{
-    elf::{DT_GNU_HASH, DT_HASH, DT_NULL, DT_STRSZ, DT_STRTAB, DT_SYMENT, DT_SYMTAB},
+    elf::{DT_GNU_HASH, DT_HASH, DT_NULL, DT_SONAME, DT_STRSZ, DT_STRTAB, DT_SYMENT, DT_SYMTAB},
     write::{elf::SectionIndex, StringId},
     Object, ObjectSection, ObjectSymbol,
 };
@@ -342,27 +342,33 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
 
     // reserve dynamic, dynsym, dynstr, hash and gnu_hash
     let mut dynamic_entries_count: usize = 5;
-    if opt.hash_style.sysv {
-        dynamic_entries_count += 1;
-    }
-    if opt.hash_style.gnu {
-        dynamic_entries_count += 1;
-    }
     let (
         dynamic_section_offset,
         dynsym_section_offset,
         dynstr_section_offset,
         hash_section_offset,
         gnu_hash_section_offset,
+        soname_dynamic_string_index,
     ) = if opt.shared {
-        // at most 7 entries:
+        // dynamic entries:
         // 1. HASH -> .hash
         // 2. GNU_HASH -> .gnu_hash
         // 3. STRTAB -> .dynstr
         // 4. SYMTAB -> .dynsym
         // 5. STRSZ
         // 6. SYMENT
-        // 7. NULL
+        // 7. SONAME
+        // 8. NULL
+        if opt.hash_style.sysv {
+            dynamic_entries_count += 1;
+        }
+        if opt.hash_style.gnu {
+            dynamic_entries_count += 1;
+        }
+        if opt.soname.is_some() {
+            dynamic_entries_count += 1;
+        }
+
         // align to 8 bytes boundary
         let dynamic_section_offset = align(writer.reserved_len());
         writer.reserve_dynamic(dynamic_entries_count);
@@ -379,6 +385,12 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
                 dyn_symbols_count += 1;
             }
         }
+
+        let soname_dynamic_string_index = if let Some(soname) = &opt.soname {
+            Some(writer.add_dynamic_string(soname.as_bytes()))
+        } else {
+            None
+        };
 
         let dynsym_section_offset = align(writer.reserved_len());
         writer.reserve_dynsym();
@@ -406,9 +418,10 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
             dynstr_section_offset,
             hash_section_offset,
             gnu_hash_section_offset,
+            soname_dynamic_string_index,
         )
     } else {
-        (0, 0, 0, 0, 0)
+        (0, 0, 0, 0, 0, None)
     };
 
     // compute mapping from section name to virtual address
@@ -610,15 +623,15 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
 
     // shared library
     if opt.shared {
-        // write dynamic table
-        // at most 7 entries:
+        // dynamic entries:
         // 1. HASH -> .hash
         // 2. GNU_HASH -> .gnu_hash
         // 3. STRTAB -> .dynstr
         // 4. SYMTAB -> .dynsym
         // 5. STRSZ
         // 6. SYMENT
-        // 7. NULL
+        // 7. SONAME
+        // 8. NULL
         writer.write_align_dynamic();
         if opt.hash_style.sysv {
             writer.write_dynamic(DT_HASH, hash_section_offset as u64);
@@ -630,6 +643,9 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
         writer.write_dynamic(DT_SYMTAB, dynsym_section_offset as u64);
         writer.write_dynamic(DT_STRSZ, 12); // entry size
         writer.write_dynamic(DT_SYMENT, 24); // entry size
+        if let Some(soname_dynamic_string_index) = soname_dynamic_string_index {
+            writer.write_dynamic_string(DT_SONAME, soname_dynamic_string_index);
+        }
         writer.write_dynamic(DT_NULL, 0);
 
         // sort symbols by gnu hash bucket: this is required for later gnu hash table to work
