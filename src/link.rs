@@ -218,143 +218,150 @@ impl<'a> Linker<'a> {
         } = self;
 
         // parse files and resolve symbols
+        let mut objs = vec![];
         for file in files {
             info!("Parsing {}", file.name);
             if file.name.ends_with(".a") {
                 // archive
-                let _ar = object::read::archive::ArchiveFile::parse(file.content.as_slice())
+                let ar = object::read::archive::ArchiveFile::parse(file.content.as_slice())
                     .context(format!("Parsing file {} as archive", file.name))?;
+                for member in ar.members() {
+                    let member = member?;
+                    let name = format!("{}/{}", file.name, std::str::from_utf8(member.name())?);
+                    info!("Parsing {}", name);
+                    let obj = object::File::parse(member.data(file.content.as_slice())?)
+                        .context(format!("Parsing file {} as object", name))?;
+                    objs.push((name, obj));
+                }
             } else {
                 // object
                 let obj = object::File::parse(file.content.as_slice())
                     .context(format!("Parsing file {} as object", file.name))?;
-                match obj {
-                    object::File::Elf64(elf) => {
-                        // collect section sizes prior to this object
-                        let section_sizes: BTreeMap<String, u64> = output_sections
-                            .iter()
-                            .map(|(key, value)| (key.clone(), value.content.len() as u64))
-                            .collect();
+                objs.push((file.name.clone(), obj));
+            }
+        }
 
-                        for section in elf.sections() {
-                            let name = section.name()?;
-                            info!("Handling section {}", name);
-                            let data = section.data()?;
-                            if data.is_empty() {
-                                continue;
-                            }
+        for (name, obj) in objs {
+            match obj {
+                object::File::Elf64(elf) => {
+                    // collect section sizes prior to this object
+                    let section_sizes: BTreeMap<String, u64> = output_sections
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.content.len() as u64))
+                        .collect();
 
-                            if !name.is_empty() {
-                                let (is_executable, is_writable) = match section.flags() {
-                                    object::SectionFlags::Elf { sh_flags } => {
-                                        if ((sh_flags as u32) & object::elf::SHF_ALLOC) == 0 {
-                                            // non-alloc, skip
-                                            continue;
+                    for section in elf.sections() {
+                        let name = section.name()?;
+                        info!("Handling section {}", name);
+                        let data = section.data()?;
+                        if data.is_empty() {
+                            continue;
+                        }
+
+                        if !name.is_empty() {
+                            let (is_executable, is_writable) = match section.flags() {
+                                object::SectionFlags::Elf { sh_flags } => {
+                                    if ((sh_flags as u32) & object::elf::SHF_ALLOC) == 0 {
+                                        // non-alloc, skip
+                                        continue;
+                                    } else {
+                                        (
+                                            ((sh_flags as u32) & object::elf::SHF_EXECINSTR) != 0,
+                                            ((sh_flags as u32) & object::elf::SHF_WRITE) != 0,
+                                        )
+                                    }
+                                }
+                                _ => unimplemented!(),
+                            };
+
+                            // copy to output
+                            let out = output_sections
+                                .entry(name.to_string())
+                                .or_insert_with(OutputSection::default);
+                            out.name = name.to_string();
+                            out.content.extend(data);
+                            out.is_executable |= is_executable;
+                            out.is_writable |= is_writable;
+                            for (offset, relocation) in section.relocations() {
+                                match relocation.target() {
+                                    object::RelocationTarget::Symbol(symbol_id) => {
+                                        let symbol = elf.symbol_by_index(symbol_id)?;
+                                        if symbol.kind() == object::SymbolKind::Section {
+                                            // relocation to a section
+                                            let section_index = symbol.section_index().unwrap();
+                                            let target_section =
+                                                elf.section_by_index(section_index)?;
+                                            let target_section_name = target_section.name()?;
+                                            info!(
+                                                "Found relocation targeting section {}",
+                                                target_section_name
+                                            );
+
+                                            out.relocations.push(Relocation {
+                                                offset: offset
+                                                    + *section_sizes.get(name).unwrap_or(&0),
+                                                inner: relocation,
+                                                target: RelocationTarget::Section((
+                                                    target_section_name.to_string(),
+                                                    // record current size of section, because there can be existing content in the section from other object file
+                                                    *section_sizes
+                                                        .get(target_section_name)
+                                                        .unwrap_or(&0),
+                                                )),
+                                            });
                                         } else {
-                                            (
-                                                ((sh_flags as u32) & object::elf::SHF_EXECINSTR)
-                                                    != 0,
-                                                ((sh_flags as u32) & object::elf::SHF_WRITE) != 0,
-                                            )
+                                            // relocation to a symbol
+                                            let symbol_name = symbol.name()?;
+                                            info!(
+                                                "Found relocation targeting symbol {}",
+                                                symbol_name
+                                            );
+
+                                            out.relocations.push(Relocation {
+                                                offset: offset
+                                                    + *section_sizes.get(name).unwrap_or(&0),
+                                                inner: relocation,
+                                                target: RelocationTarget::Symbol(
+                                                    symbol_name.to_string(),
+                                                ),
+                                            });
                                         }
                                     }
                                     _ => unimplemented!(),
                                 };
-
-                                // copy to output
-                                let out = output_sections
-                                    .entry(name.to_string())
-                                    .or_insert_with(OutputSection::default);
-                                out.name = name.to_string();
-                                out.content.extend(data);
-                                out.is_executable |= is_executable;
-                                out.is_writable |= is_writable;
-                                for (offset, relocation) in section.relocations() {
-                                    match relocation.target() {
-                                        object::RelocationTarget::Symbol(symbol_id) => {
-                                            let symbol = elf.symbol_by_index(symbol_id)?;
-                                            if symbol.kind() == object::SymbolKind::Section {
-                                                // relocation to a section
-                                                let section_index = symbol.section_index().unwrap();
-                                                let target_section =
-                                                    elf.section_by_index(section_index)?;
-                                                let target_section_name = target_section.name()?;
-                                                info!(
-                                                    "Found relocation targeting section {}",
-                                                    target_section_name
-                                                );
-
-                                                out.relocations.push(Relocation {
-                                                    offset: offset
-                                                        + *section_sizes.get(name).unwrap_or(&0),
-                                                    inner: relocation,
-                                                    target: RelocationTarget::Section((
-                                                        target_section_name.to_string(),
-                                                        // record current size of section, because there can be existing content in the section from other object file
-                                                        *section_sizes
-                                                            .get(target_section_name)
-                                                            .unwrap_or(&0),
-                                                    )),
-                                                });
-                                            } else {
-                                                // relocation to a symbol
-                                                let symbol_name = symbol.name()?;
-                                                info!(
-                                                    "Found relocation targeting symbol {}",
-                                                    symbol_name
-                                                );
-
-                                                out.relocations.push(Relocation {
-                                                    offset: offset
-                                                        + *section_sizes.get(name).unwrap_or(&0),
-                                                    inner: relocation,
-                                                    target: RelocationTarget::Symbol(
-                                                        symbol_name.to_string(),
-                                                    ),
-                                                });
-                                            }
-                                        }
-                                        _ => unimplemented!(),
-                                    };
-                                }
-                            }
-                        }
-
-                        // skip the first symbol which is null
-                        for symbol in elf.symbols().skip(1) {
-                            if !symbol.is_undefined()
-                                && symbol.kind() != object::SymbolKind::Section
-                            {
-                                let name = symbol.name()?;
-                                match symbol.section() {
-                                    object::SymbolSection::Section(section_index) => {
-                                        let section = elf.section_by_index(section_index)?;
-                                        let section_name = section.name()?;
-                                        info!(
-                                            "Defining symbol {} from section {}",
-                                            name, section_name
-                                        );
-                                        // offset: consider existing section content from other files
-                                        let offset = symbol.address()
-                                            + section_sizes.get(section_name).unwrap_or(&0);
-                                        symbols.insert(
-                                            name.to_string(),
-                                            Symbol {
-                                                section_name: section_name.to_string(),
-                                                offset,
-                                                symbol_name_string_id: None,
-                                                symbol_name_dynamic_string_id: None,
-                                                is_global: symbol.is_global(),
-                                            },
-                                        );
-                                    }
-                                    _ => unimplemented!(),
-                                }
                             }
                         }
                     }
-                    _ => return Err(anyhow!("Unsupported format of file {}", file.name)),
+
+                    // skip the first symbol which is null
+                    for symbol in elf.symbols().skip(1) {
+                        if !symbol.is_undefined() && symbol.kind() != object::SymbolKind::Section {
+                            let name = symbol.name()?;
+                            match symbol.section() {
+                                object::SymbolSection::Section(section_index) => {
+                                    let section = elf.section_by_index(section_index)?;
+                                    let section_name = section.name()?;
+                                    info!("Defining symbol {} from section {}", name, section_name);
+                                    // offset: consider existing section content from other files
+                                    let offset = symbol.address()
+                                        + section_sizes.get(section_name).unwrap_or(&0);
+                                    symbols.insert(
+                                        name.to_string(),
+                                        Symbol {
+                                            section_name: section_name.to_string(),
+                                            offset,
+                                            symbol_name_string_id: None,
+                                            symbol_name_dynamic_string_id: None,
+                                            is_global: symbol.is_global(),
+                                        },
+                                    );
+                                }
+                                _ => unimplemented!(),
+                            }
+                        }
+                    }
                 }
+                _ => return Err(anyhow!("Unsupported format of file {}", name)),
             }
         }
 
