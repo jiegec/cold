@@ -19,6 +19,12 @@ ld helloworld2_asm1.o helloworld2_asm2.o -o helloworld2_asm
 
 readelf -a helloworld2_asm > helloworld2_asm.readelf
 
+# helloworld3_asm
+as helloworld3_asm_library.s -o helloworld3_asm_library.o
+ld -shared helloworld3_asm_library.o -o helloworld3_asm_library.so
+as helloworld3_asm_main.s -o helloworld3_asm_main.o
+ld -dynamic-linker /lib64/ld-linux-x86-64.so.2 helloworld3_asm_main.o helloworld3_asm_library.so -o helloworld3_asm
+
 # uname_asm
 as uname_asm.s -o uname_asm.o
 ld uname_asm.o -o uname_asm

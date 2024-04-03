@@ -45,6 +45,8 @@ pub struct Opt {
     pub eh_frame_hdr: bool,
     /// -pie
     pub pie: bool,
+    /// -shared
+    pub shared: bool,
     /// -m emulation
     pub emulation: Option<String>,
     /// -o output
@@ -115,6 +117,9 @@ pub fn parse_opts(args: &Vec<String>) -> anyhow::Result<Opt> {
             }
             s @ _ if s.starts_with("-plugin-opt=") => {
                 // ignored
+            }
+            "-shared" => {
+                opt.shared = true;
             }
             "-static" => {
                 cur_opt_stack.link_static = true;

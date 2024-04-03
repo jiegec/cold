@@ -2,6 +2,7 @@ use crate::opt::{FileOpt, ObjectFileOpt, Opt};
 use anyhow::{anyhow, Context};
 use log::{info, warn};
 use object::{
+    elf::{DT_GNU_HASH, DT_HASH, DT_NULL, DT_STRSZ, DT_STRTAB, DT_SYMENT, DT_SYMTAB},
     write::{elf::SectionIndex, StringId},
     Object, ObjectSection, ObjectSymbol,
 };
@@ -79,11 +80,16 @@ pub struct Relocation {
 
 #[derive(Debug)]
 pub struct Symbol {
+    // reside in which section
     section_name: String,
     // offset into the output section
     offset: u64,
-    // indices in output ELF
+    // indices in output .strtab
     symbol_name_string_id: Option<StringId>,
+    // indices in output .dynstr
+    symbol_name_dynamic_string_id: Option<StringId>,
+    // local or global
+    is_global: bool,
 }
 
 #[derive(Default, Debug)]
@@ -99,6 +105,11 @@ pub struct OutputSection {
     // indices in output ELF
     pub section_index: Option<SectionIndex>,
     pub name_string_id: Option<StringId>,
+}
+
+// align up to 8 bytes boundary (elf 64)
+fn align(num: usize) -> u64 {
+    ((num + 7) & !7) as u64
 }
 
 /// Do the actual linking
@@ -249,6 +260,8 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
                                             section_name: section_name.to_string(),
                                             offset: offset,
                                             symbol_name_string_id: None,
+                                            symbol_name_dynamic_string_id: None,
+                                            is_global: symbol.is_global(),
                                         },
                                     );
                                 }
@@ -270,13 +283,19 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
     // assign address to output sections
     // and generate layout of executable
     // assume executable is loaded at 0x400000
+    let load_address = if opt.shared { 0 } else { 0x400000 };
     // the first page is reserved for ELF header & program header
     writer.reserve_file_header();
     // for simplicity, use one segment to map them all
-    writer.reserve_program_headers(1);
+    writer.reserve_program_headers(if opt.shared {
+        // PT_LOAD + PT_DYNAMIC
+        2
+    } else {
+        // PT_LOAD
+        1
+    });
 
     // thus sections begin at 0x401000
-    let load_address = 0x400000;
     for (_name, output_section) in &mut output_sections {
         output_section.offset = writer.reserve(output_section.content.len(), 4096) as u64;
     }
@@ -294,6 +313,14 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
     let _symtab_section_index = writer.reserve_symtab_section_index();
     let _strtab_section_index = writer.reserve_strtab_section_index();
     let _shstrtab_section_index = writer.reserve_shstrtab_section_index();
+    if opt.shared {
+        // .dynamic, .dynsym, .dynstr, .hash, .gnu_hash
+        let _dynamic_section_index = writer.reserve_dynamic_section_index();
+        let _dynsym_section_index = writer.reserve_dynsym_section_index();
+        let _dynstr_section_index = writer.reserve_dynstr_section_index();
+        let _hash_section_index = writer.reserve_hash_section_index();
+        let _gnu_hash_section_index = writer.reserve_gnu_hash_section_index();
+    }
     writer.reserve_section_headers();
 
     // prepare symbol table
@@ -308,6 +335,66 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
     writer.reserve_symtab();
     writer.reserve_strtab();
     writer.reserve_shstrtab();
+
+    // reserve dynamic, dynsym, dynstr, hash and gnu_hash
+    const DYNAMIC_ENTRIES_COUNT: usize = 7;
+    let (
+        dynamic_section_offset,
+        dynsym_section_offset,
+        dynstr_section_offset,
+        hash_section_offset,
+        gnu_hash_section_offset,
+    ) = if opt.shared {
+        // 7 entries:
+        // 1. HASH -> .hash
+        // 2. GNU_HASH -> .gnu_hash
+        // 3. STRTAB -> .dynstr
+        // 4. SYMTAB -> .dynsym
+        // 5. STRSZ
+        // 6. SYMENT
+        // 7. NULL
+        // align to 8 bytes boundary
+        let dynamic_section_offset = align(writer.reserved_len());
+        writer.reserve_dynamic(DYNAMIC_ENTRIES_COUNT);
+
+        // dynamic symbols
+        writer.reserve_null_dynamic_symbol_index();
+        let mut dyn_symbols_count = 0;
+        for (symbol_name, symbol) in &mut symbols {
+            if symbol.is_global {
+                // only consider global symbols
+                symbol.symbol_name_dynamic_string_id =
+                    Some(writer.add_dynamic_string(arena.alloc_str(&symbol_name).as_bytes()));
+                writer.reserve_dynamic_symbol_index();
+                dyn_symbols_count += 1;
+            }
+        }
+
+        let dynsym_section_offset = align(writer.reserved_len());
+        writer.reserve_dynsym();
+
+        // dynamic string
+        let dynstr_section_offset = align(writer.reserved_len());
+        writer.reserve_dynstr();
+
+        // hash table
+        let hash_section_offset = align(writer.reserved_len());
+        writer.reserve_hash(dyn_symbols_count, dyn_symbols_count);
+
+        // gnu hash table
+        let gnu_hash_section_offset = align(writer.reserved_len());
+        writer.reserve_gnu_hash(1, dyn_symbols_count, dyn_symbols_count);
+
+        (
+            dynamic_section_offset,
+            dynsym_section_offset,
+            dynstr_section_offset,
+            hash_section_offset,
+            gnu_hash_section_offset,
+        )
+    } else {
+        (0, 0, 0, 0, 0)
+    };
 
     // compute mapping from section name to virtual address
     let mut section_address: BTreeMap<String, u64> = BTreeMap::new();
@@ -331,6 +418,13 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
                 }
             };
 
+            // symbol
+            let s = target_address as i64;
+            // addend
+            let a = relocation.inner.addend();
+            // pc
+            let p = load_address + output_section.offset + relocation.offset;
+
             match (
                 relocation.inner.kind(),
                 relocation.inner.encoding(),
@@ -340,7 +434,7 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
                 (object::RelocationKind::Absolute, object::RelocationEncoding::X86Signed, 32) => {
                     info!("Handling relocation type R_X86_64_32S");
                     // S + A
-                    let value = target_address as i64 + relocation.inner.addend();
+                    let value = s.wrapping_add(a);
                     output_section.content
                         [(relocation.offset) as usize..(relocation.offset + 4) as usize]
                         .copy_from_slice(&(value as i32).to_le_bytes());
@@ -350,8 +444,17 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
                     info!("Handling relocation type R_X86_64_PLT32");
                     // we don't have PLT now, implement as R_X86_64_PC32
                     // S + A - P
-                    let mut value = target_address as i64 + relocation.inner.addend();
-                    value -= (load_address + output_section.offset + relocation.offset) as i64;
+                    let value = s.wrapping_add(a).wrapping_sub_unsigned(p);
+
+                    output_section.content
+                        [(relocation.offset) as usize..(relocation.offset + 4) as usize]
+                        .copy_from_slice(&(value as i32).to_le_bytes());
+                }
+                // R_X86_64_PC32
+                (object::RelocationKind::Relative, object::RelocationEncoding::Generic, 32) => {
+                    info!("Handling relocation type R_X86_64_PC32");
+                    // S + A - P
+                    let value = s.wrapping_add(a).wrapping_sub_unsigned(p);
 
                     output_section.content
                         [(relocation.offset) as usize..(relocation.offset + 4) as usize]
@@ -364,14 +467,23 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
 
     // all set! we can now write actual data to buffer
     // compute entrypoint address
-    let entry_symbol = &symbols["_start"];
-    let entry_address = section_address[&entry_symbol.section_name] + entry_symbol.offset;
+    let entry_address = if opt.shared {
+        // building shared library, no entrypoint
+        0
+    } else {
+        let entry_symbol = &symbols["_start"];
+        section_address[&entry_symbol.section_name] + entry_symbol.offset
+    };
 
     // ELF header
     writer.write_file_header(&FileHeader {
         os_abi: 0,
         abi_version: 0,
-        e_type: object::elf::ET_EXEC,
+        e_type: if opt.shared {
+            object::elf::ET_DYN
+        } else {
+            object::elf::ET_EXEC
+        },
         e_machine: object::elf::EM_X86_64,
         // assume that entrypoint is pointed at _start
         e_entry: entry_address,
@@ -389,6 +501,22 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
         p_memsz: writer.reserved_len() as u64,
         p_align: 4096,
     });
+    if opt.shared {
+        writer.write_program_header(&ProgramHeader {
+            p_type: object::elf::PT_DYNAMIC,
+            p_flags: object::elf::PF_W | object::elf::PF_R,
+            p_offset: dynamic_section_offset as u64,
+            p_vaddr: dynamic_section_offset as u64,
+            p_paddr: dynamic_section_offset as u64,
+            p_filesz: (DYNAMIC_ENTRIES_COUNT
+                * std::mem::size_of::<object::elf::Dyn64<object::LittleEndian>>())
+                as u64,
+            p_memsz: (DYNAMIC_ENTRIES_COUNT
+                * std::mem::size_of::<object::elf::Dyn64<object::LittleEndian>>())
+                as u64,
+            p_align: 8,
+        });
+    }
 
     // write section data
     for (_name, output_section) in &mut output_sections {
@@ -423,6 +551,13 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
     writer.write_symtab_section_header(1); // one local: null symbol
     writer.write_strtab_section_header();
     writer.write_shstrtab_section_header();
+    if opt.shared {
+        writer.write_dynamic_section_header(dynamic_section_offset as u64);
+        writer.write_dynsym_section_header(dynsym_section_offset as u64, 1); // one local: null symbol
+        writer.write_dynstr_section_header(dynstr_section_offset as u64);
+        writer.write_hash_section_header(hash_section_offset as u64);
+        writer.write_gnu_hash_section_header(gnu_hash_section_offset as u64);
+    }
 
     // write symbol table
     writer.write_null_symbol();
@@ -431,6 +566,7 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
         writer.write_symbol(&Sym {
             name: symbol.symbol_name_string_id,
             section: output_sections[&symbol.section_name].section_index,
+            // TODO: handle local symbols and put them first
             st_info: (object::elf::STB_GLOBAL) << 4,
             st_other: 0,
             st_shndx: 0,
@@ -444,6 +580,77 @@ pub fn link(opt: &Opt) -> anyhow::Result<()> {
 
     // write section string table
     writer.write_shstrtab();
+
+    // shared library
+    if opt.shared {
+        // write dynamic table
+        // 7 entries:
+        // 1. HASH -> .hash
+        // 2. GNU_HASH -> .gnu_hash
+        // 3. STRTAB -> .dynstr
+        // 4. SYMTAB -> .dynsym
+        // 5. STRSZ
+        // 6. SYMENT
+        // 7. NULL
+        writer.write_align_dynamic();
+        writer.write_dynamic(DT_HASH, hash_section_offset as u64);
+        writer.write_dynamic(DT_GNU_HASH, gnu_hash_section_offset as u64);
+        writer.write_dynamic(DT_STRTAB, dynstr_section_offset as u64);
+        writer.write_dynamic(DT_SYMTAB, dynsym_section_offset as u64);
+        writer.write_dynamic(DT_STRSZ, 12); // entry size
+        writer.write_dynamic(DT_SYMENT, 24); // entry size
+        writer.write_dynamic(DT_NULL, 0);
+
+        // sort symbols by gnu hash bucket: this is required for later gnu hash table to work
+        let mut dyn_symbols = vec![];
+        for (symbol_name, symbol) in &symbols {
+            if symbol.is_global {
+                dyn_symbols.push((symbol_name, symbol));
+            }
+        }
+        let bucket_count = dyn_symbols.len();
+        dyn_symbols.sort_by_key(|(name, _sym)| {
+            let hash = object::elf::gnu_hash(name.as_bytes());
+            hash % bucket_count as u32
+        });
+
+        // write dynamic symbols
+        writer.write_null_dynamic_symbol();
+        for (_symbol_name, symbol) in &dyn_symbols {
+            let address = section_address[&symbol.section_name] + symbol.offset;
+            writer.write_dynamic_symbol(&Sym {
+                name: symbol.symbol_name_dynamic_string_id,
+                section: output_sections[&symbol.section_name].section_index,
+                st_info: (object::elf::STB_GLOBAL) << 4,
+                st_other: 0,
+                st_shndx: 0,
+                st_value: address,
+                st_size: 0,
+            });
+        }
+
+        // write dynamic string table
+        writer.write_dynstr();
+
+        // write hash table
+        writer.write_hash(dyn_symbols.len() as u32, dyn_symbols.len() as u32, |idx| {
+            // compute sysv hash of symbol name
+            Some(object::elf::hash(dyn_symbols[idx as usize].0.as_bytes()))
+        });
+
+        // write gnu hash table
+        writer.write_gnu_hash(
+            1, // must be at least one to skip the first NULL symbol
+            1,
+            1,
+            dyn_symbols.len() as u32,
+            dyn_symbols.len() as u32,
+            |idx| {
+                // compute gnu hash of symbol name
+                object::elf::gnu_hash(dyn_symbols[idx as usize].0.as_bytes())
+            },
+        );
+    }
 
     // done, save to file
     let output = opt.output.as_ref().unwrap();
