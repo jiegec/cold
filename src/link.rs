@@ -1,6 +1,5 @@
 use crate::opt::{FileOpt, ObjectFileOpt, Opt};
 use anyhow::{anyhow, Context};
-use log::{info, warn};
 use object::elf::Sym64;
 use object::write::elf::*;
 use object::LittleEndian;
@@ -13,6 +12,7 @@ use object::{
     Object, ObjectSection, ObjectSymbol,
 };
 use std::{collections::BTreeMap, os::unix::fs::PermissionsExt, path::PathBuf};
+use tracing::{event, info, info_span, warn};
 use typed_arena::Arena;
 
 fn lookup_file(name: &str, paths: &Vec<String>) -> anyhow::Result<PathBuf> {
@@ -243,7 +243,7 @@ impl<'a> Linker<'a> {
         }
 
         for (name, obj) in objs {
-            info!("Handling file {}", name);
+            let _span = info_span!("file", name).entered();
             match obj {
                 object::File::Elf64(elf) => {
                     // collect section sizes prior to this object
@@ -255,7 +255,7 @@ impl<'a> Linker<'a> {
                     for section in elf.sections() {
                         let name = section.name()?;
                         if !name.is_empty() {
-                            info!("Handling section {}", name);
+                            let _span = info_span!("section", name).entered();
                             let data = section.data()?;
                             let (is_executable, is_writable) = match section.flags() {
                                 object::SectionFlags::Elf { sh_flags } => {
@@ -405,7 +405,7 @@ impl<'a> Linker<'a> {
         for (_name, output_section) in output_sections.iter_mut() {
             output_section.offset = writer.reserve(output_section.content.len(), 4096) as u64;
         }
-        info!("Output sections: {:?}", output_sections);
+        info!("Got {} output sections", output_sections.len());
 
         // reserve section headers
         writer.reserve_null_section_index();
@@ -765,15 +765,16 @@ impl<'a> Linker<'a> {
 
         // compute relocation
         for (name, output_section) in output_sections.iter_mut() {
-            for relocation in &output_section.relocations {
-                info!("Handling relocation {:?} from section {}", relocation, name);
+            let _span = info_span!("section", name = name).entered();
+            for (index, relocation) in output_section.relocations.iter().enumerate() {
+                let _span = info_span!("relocation", index = index).entered();
                 let target_address = match &relocation.target {
                     RelocationTarget::Section((name, offset)) => {
-                        info!("Handling relocation targeting section {}", name);
+                        info!("Relocation is targeting section {}", name);
                         section_address[name] + offset
                     }
                     RelocationTarget::Symbol(name) => {
-                        info!("Handling relocation targeting symbol {}", name);
+                        info!("Relocation is targeting symbol {}", name);
                         let symbol = &symbols[name];
                         section_address[&symbol.section_name] + symbol.offset
                     }
@@ -793,7 +794,7 @@ impl<'a> Linker<'a> {
                 ) {
                     // R_X86_64_64
                     (object::RelocationKind::Absolute, object::RelocationEncoding::Generic, 64) => {
-                        info!("Handling relocation type R_X86_64_64");
+                        info!("Relocation type is R_X86_64_64");
                         // S + A
                         let value = s.wrapping_add(a);
                         output_section.content
@@ -806,7 +807,7 @@ impl<'a> Linker<'a> {
                         object::RelocationEncoding::X86Signed,
                         32,
                     ) => {
-                        info!("Handling relocation type R_X86_64_32S");
+                        info!("Relocation type is R_X86_64_32S");
                         // S + A
                         let value = s.wrapping_add(a);
                         output_section.content
@@ -819,7 +820,7 @@ impl<'a> Linker<'a> {
                         object::RelocationEncoding::Generic,
                         32,
                     ) => {
-                        info!("Handling relocation type R_X86_64_PLT32");
+                        info!("Relocation type is R_X86_64_PLT32");
                         // we don't have PLT now, implement as R_X86_64_PC32
                         // S + A - P
                         let value = s.wrapping_add(a).wrapping_sub_unsigned(p);
@@ -830,7 +831,7 @@ impl<'a> Linker<'a> {
                     }
                     // R_X86_64_PC32
                     (object::RelocationKind::Relative, object::RelocationEncoding::Generic, 32) => {
-                        info!("Handling relocation type R_X86_64_PC32");
+                        info!("Relocation type is R_X86_64_PC32");
                         // S + A - P
                         let value = s.wrapping_add(a).wrapping_sub_unsigned(p);
 

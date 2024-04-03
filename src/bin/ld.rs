@@ -1,8 +1,8 @@
 use cold::{link::link, opt::parse_opts};
-use log::info;
+use tracing::info;
 
 fn main() -> anyhow::Result<()> {
-    env_logger::init();
+    tracing_subscriber::fmt::init();
 
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     info!("Launched with args: {:?}", args);
