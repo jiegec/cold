@@ -1,7 +1,9 @@
 use crate::opt::{FileOpt, ObjectFileOpt, Opt};
 use anyhow::{anyhow, Context};
 use log::{info, warn};
+use object::elf::Sym64;
 use object::write::elf::*;
+use object::LittleEndian;
 use object::{
     elf::{DT_GNU_HASH, DT_HASH, DT_NULL, DT_SONAME, DT_STRSZ, DT_STRTAB, DT_SYMENT, DT_SYMTAB},
     write::{
@@ -109,11 +111,6 @@ pub struct OutputSection {
     // indices in output ELF
     pub section_index: Option<SectionIndex>,
     pub name_string_id: Option<StringId>,
-}
-
-// align up to 8 bytes boundary (elf 64)
-fn align(num: usize) -> u64 {
-    ((num + 7) & !7) as u64
 }
 
 struct Linker<'a> {
@@ -247,16 +244,31 @@ impl<'a> Linker<'a> {
                                 continue;
                             }
 
-                            if ![".symtab", ".strtab", ".shstrtab"].contains(&name)
-                                && !name.starts_with(".rela")
-                                && !name.is_empty()
-                            {
+                            if !name.is_empty() {
+                                let (is_executable, is_writable) = match section.flags() {
+                                    object::SectionFlags::Elf { sh_flags } => {
+                                        if ((sh_flags as u32) & object::elf::SHF_ALLOC) == 0 {
+                                            // non-alloc, skip
+                                            continue;
+                                        } else {
+                                            (
+                                                ((sh_flags as u32) & object::elf::SHF_EXECINSTR)
+                                                    != 0,
+                                                ((sh_flags as u32) & object::elf::SHF_WRITE) != 0,
+                                            )
+                                        }
+                                    }
+                                    _ => unimplemented!(),
+                                };
+
                                 // copy to output
                                 let out = output_sections
                                     .entry(name.to_string())
                                     .or_insert_with(OutputSection::default);
                                 out.name = name.to_string();
                                 out.content.extend(data);
+                                out.is_executable |= is_executable;
+                                out.is_writable |= is_writable;
                                 for (offset, relocation) in section.relocations() {
                                     match relocation.target() {
                                         object::RelocationTarget::Symbol(symbol_id) => {
@@ -304,16 +316,6 @@ impl<'a> Linker<'a> {
                                         }
                                         _ => unimplemented!(),
                                     };
-                                }
-
-                                match section.flags() {
-                                    object::SectionFlags::Elf { sh_flags } => {
-                                        out.is_executable |=
-                                            ((sh_flags as u32) & object::elf::SHF_EXECINSTR) != 0;
-                                        out.is_writable |=
-                                            ((sh_flags as u32) & object::elf::SHF_WRITE) != 0;
-                                    }
-                                    _ => unimplemented!(),
                                 }
                             }
                         }
@@ -450,8 +452,7 @@ impl<'a> Linker<'a> {
             }
 
             // align to 8 bytes boundary
-            self.dynamic_section_offset = align(writer.reserved_len());
-            writer.reserve_dynamic(self.dynamic_entries_count);
+            self.dynamic_section_offset = writer.reserve_dynamic(self.dynamic_entries_count) as u64;
 
             // dynamic symbols
             writer.reserve_null_dynamic_symbol_index();
@@ -471,24 +472,22 @@ impl<'a> Linker<'a> {
                     Some(writer.add_dynamic_string(arena.alloc_str(soname).as_bytes()))
             };
 
-            self.dynsym_section_offset = align(writer.reserved_len());
-            writer.reserve_dynsym();
+            self.dynsym_section_offset = writer.reserve_dynsym() as u64;
 
             // dynamic string
-            self.dynstr_section_offset = align(writer.reserved_len());
-            writer.reserve_dynstr();
+            self.dynstr_section_offset = writer.reserve_dynstr() as u64;
 
             // hash table
-            self.hash_section_offset = align(writer.reserved_len());
             if opt.hash_style.sysv {
                 // chain count: 1 extra element for NULL symbol
-                writer.reserve_hash(dyn_symbols_count, dyn_symbols_count + 1);
+                self.hash_section_offset =
+                    writer.reserve_hash(dyn_symbols_count, dyn_symbols_count + 1) as u64;
             }
 
             // gnu hash table
-            self.gnu_hash_section_offset = align(writer.reserved_len());
             if opt.hash_style.gnu {
-                writer.reserve_gnu_hash(1, dyn_symbols_count, dyn_symbols_count);
+                self.gnu_hash_section_offset =
+                    writer.reserve_gnu_hash(1, dyn_symbols_count, dyn_symbols_count) as u64;
             }
         };
 
@@ -654,8 +653,9 @@ impl<'a> Linker<'a> {
             }
             writer.write_dynamic(DT_STRTAB, self.dynstr_section_offset);
             writer.write_dynamic(DT_SYMTAB, self.dynsym_section_offset);
-            writer.write_dynamic(DT_STRSZ, 12); // entry size
-            writer.write_dynamic(DT_SYMENT, 24); // entry size
+            let strsz = writer.dynstr_len() as u64;
+            writer.write_dynamic(DT_STRSZ, strsz); // size of dynamic string table
+            writer.write_dynamic(DT_SYMENT, std::mem::size_of::<Sym64<LittleEndian>>() as u64); // entry size
             if let Some(soname_dynamic_string_index) = &soname_dynamic_string_index {
                 writer.write_dynamic_string(DT_SONAME, *soname_dynamic_string_index);
             }

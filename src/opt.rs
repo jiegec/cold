@@ -213,7 +213,7 @@ mod tests {
     use super::*;
     #[test]
     fn test_push_pop_state() {
-        let opts = parse_opts(&vec![
+        let opts = parse_opts(&[
             "-la".to_string(),
             "--push-state".to_string(),
             "--as-needed".to_string(),
