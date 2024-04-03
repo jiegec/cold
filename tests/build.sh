@@ -29,3 +29,8 @@ ld -dynamic-linker /lib64/ld-linux-x86-64.so.2 helloworld3_asm_main.o helloworld
 as uname_asm.s -o uname_asm.o
 ld uname_asm.o -o uname_asm
 readelf -a uname_asm > uname_asm.readelf
+
+# bss_asm
+as bss_asm.s -o bss_asm.o
+ld bss_asm.o -o bss_asm
+readelf -a bss_asm > bss_asm.readelf

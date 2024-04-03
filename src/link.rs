@@ -111,6 +111,7 @@ pub struct OutputSection {
     // indices in output ELF
     pub section_index: Option<SectionIndex>,
     pub name_string_id: Option<StringId>,
+    pub is_bss: bool,
 }
 
 struct Linker<'a> {
@@ -253,13 +254,9 @@ impl<'a> Linker<'a> {
 
                     for section in elf.sections() {
                         let name = section.name()?;
-                        info!("Handling section {}", name);
-                        let data = section.data()?;
-                        if data.is_empty() {
-                            continue;
-                        }
-
                         if !name.is_empty() {
+                            info!("Handling section {}", name);
+                            let data = section.data()?;
                             let (is_executable, is_writable) = match section.flags() {
                                 object::SectionFlags::Elf { sh_flags } => {
                                     if ((sh_flags as u32) & object::elf::SHF_ALLOC) == 0 {
@@ -281,8 +278,16 @@ impl<'a> Linker<'a> {
                                 .or_insert_with(OutputSection::default);
                             out.name = name.to_string();
                             out.content.extend(data);
+                            if (data.len() as u64) < section.size() {
+                                // handle bss, extend with zero
+                                out.content.resize(
+                                    out.content.len() - data.len() + section.size() as usize,
+                                    0,
+                                );
+                            }
                             out.is_executable |= is_executable;
                             out.is_writable |= is_writable;
+                            out.is_bss |= section.kind() == object::SectionKind::UninitializedData;
                             for (offset, relocation) in section.relocations() {
                                 match relocation.target() {
                                     object::RelocationTarget::Symbol(symbol_id) => {
@@ -588,7 +593,11 @@ impl<'a> Linker<'a> {
 
             writer.write_section_header(&SectionHeader {
                 name: output_section.name_string_id,
-                sh_type: object::elf::SHT_PROGBITS,
+                sh_type: if output_section.is_bss {
+                    object::elf::SHT_NOBITS
+                } else {
+                    object::elf::SHT_PROGBITS
+                },
                 sh_flags: flags as u64,
                 sh_addr: section_address[name],
                 sh_offset: output_section.offset,

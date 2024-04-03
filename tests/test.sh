@@ -47,3 +47,9 @@ RUST_LOG=info cargo run -- uname_asm.o -o uname_asm_cold
 ./uname_asm_cold
 [[ $(./uname_asm_cold) =~ "Linux" ]] || exit 1
 readelf -a uname_asm_cold > uname_asm_cold.readelf
+
+# bss_asm
+RUST_LOG=info cargo run -- bss_asm.o -o bss_asm_cold
+./bss_asm_cold
+[[ $(./bss_asm_cold) =~ "f" ]] || exit 1
+readelf -a bss_asm_cold > bss_asm_cold.readelf
