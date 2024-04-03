@@ -242,6 +242,7 @@ impl<'a> Linker<'a> {
         }
 
         for (name, obj) in objs {
+            info!("Handling file {}", name);
             match obj {
                 object::File::Elf64(elf) => {
                     // collect section sizes prior to this object
@@ -335,7 +336,10 @@ impl<'a> Linker<'a> {
 
                     // skip the first symbol which is null
                     for symbol in elf.symbols().skip(1) {
-                        if !symbol.is_undefined() && symbol.kind() != object::SymbolKind::Section {
+                        if !symbol.is_undefined()
+                            && symbol.kind() != object::SymbolKind::Section
+                            && symbol.kind() != object::SymbolKind::File
+                        {
                             let name = symbol.name()?;
                             match symbol.section() {
                                 object::SymbolSection::Section(section_index) => {
@@ -356,7 +360,7 @@ impl<'a> Linker<'a> {
                                         },
                                     );
                                 }
-                                _ => unimplemented!(),
+                                _ => unimplemented!("{:?}", symbol.kind()),
                             }
                         }
                     }
@@ -778,6 +782,15 @@ impl<'a> Linker<'a> {
                     relocation.inner.encoding(),
                     relocation.inner.size(),
                 ) {
+                    // R_X86_64_64
+                    (object::RelocationKind::Absolute, object::RelocationEncoding::Generic, 64) => {
+                        info!("Handling relocation type R_X86_64_64");
+                        // S + A
+                        let value = s.wrapping_add(a);
+                        output_section.content
+                            [(relocation.offset) as usize..(relocation.offset + 8) as usize]
+                            .copy_from_slice(&(value as i64).to_le_bytes());
+                    }
                     // R_X86_64_32S
                     (
                         object::RelocationKind::Absolute,
