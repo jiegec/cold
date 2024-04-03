@@ -79,7 +79,7 @@ pub struct Opt {
 }
 
 /// parse arguments
-pub fn parse_opts(args: &Vec<String>) -> anyhow::Result<Opt> {
+pub fn parse_opts(args: &[String]) -> anyhow::Result<Opt> {
     let mut opt = Opt::default();
     let mut cur_opt_stack = OptStack {
         as_needed: false,
@@ -90,7 +90,7 @@ pub fn parse_opts(args: &Vec<String>) -> anyhow::Result<Opt> {
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             // single dash
-            s @ _ if s.starts_with("-L") => {
+            s if s.starts_with("-L") => {
                 // library search path argument
                 opt.search_dir
                     .push(s.strip_prefix("-L").unwrap().to_string());
@@ -103,7 +103,7 @@ pub fn parse_opts(args: &Vec<String>) -> anyhow::Result<Opt> {
                         .to_string(),
                 );
             }
-            s @ _ if s.starts_with("-l") => {
+            s if s.starts_with("-l") => {
                 // library argument
                 opt.obj_file.push(ObjectFileOpt::Library(LibraryOpt {
                     name: s.strip_prefix("-l").unwrap().to_string(),
@@ -134,7 +134,7 @@ pub fn parse_opts(args: &Vec<String>) -> anyhow::Result<Opt> {
                 // skip plugin argument
                 iter.next();
             }
-            s @ _ if s.starts_with("-plugin-opt=") => {
+            s if s.starts_with("-plugin-opt=") => {
                 // ignored
             }
             "-shared" => {
@@ -165,7 +165,7 @@ pub fn parse_opts(args: &Vec<String>) -> anyhow::Result<Opt> {
             "--end-group" => {
                 opt.obj_file.push(ObjectFileOpt::EndGroup);
             }
-            s @ _ if s.starts_with("--hash-style=") => match s {
+            s if s.starts_with("--hash-style=") => match s {
                 "--hash-style=sysv" => {
                     opt.hash_style.sysv = true;
                     opt.hash_style.gnu = false;
@@ -192,11 +192,11 @@ pub fn parse_opts(args: &Vec<String>) -> anyhow::Result<Opt> {
                 opt_stack.push(cur_opt_stack);
             }
             // end of known flags
-            s @ _ if s.starts_with("-") => {
+            s if s.starts_with('-') => {
                 // unknown flag
                 return Err(anyhow!("Unknown argument: {s}"));
             }
-            s @ _ => {
+            s => {
                 // object file argument
                 opt.obj_file.push(ObjectFileOpt::File(FileOpt {
                     name: s.to_string(),
@@ -226,21 +226,21 @@ mod tests {
         assert_eq!(opts.obj_file.len(), 3);
         if let ObjectFileOpt::Library(lib) = &opts.obj_file[0] {
             assert_eq!(lib.name, "a");
-            assert_eq!(lib.as_needed, false);
+            assert!(!lib.as_needed);
         } else {
             assert!(false);
         }
 
         if let ObjectFileOpt::Library(lib) = &opts.obj_file[1] {
             assert_eq!(lib.name, "b");
-            assert_eq!(lib.as_needed, true);
+            assert!(lib.as_needed);
         } else {
             assert!(false);
         }
 
         if let ObjectFileOpt::Library(lib) = &opts.obj_file[2] {
             assert_eq!(lib.name, "c");
-            assert_eq!(lib.as_needed, false);
+            assert!(!lib.as_needed);
         } else {
             assert!(false);
         }
