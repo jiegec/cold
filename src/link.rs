@@ -1,5 +1,5 @@
 use crate::opt::{FileOpt, ObjectFileOpt, Opt};
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, bail, Context};
 use object::elf::Sym64;
 use object::write::elf::*;
 use object::LittleEndian;
@@ -12,7 +12,7 @@ use object::{
     Object, ObjectSection, ObjectSymbol,
 };
 use std::{collections::BTreeMap, os::unix::fs::PermissionsExt, path::PathBuf};
-use tracing::{event, info, info_span, warn};
+use tracing::{info, info_span, warn};
 use typed_arena::Arena;
 
 fn lookup_file(name: &str, paths: &Vec<String>) -> anyhow::Result<PathBuf> {
@@ -228,7 +228,7 @@ impl<'a> Linker<'a> {
                     .context(format!("Parsing file {} as archive", file.name))?;
                 for member in ar.members() {
                     let member = member?;
-                    let name = format!("{}/{}", file.name, std::str::from_utf8(member.name())?);
+                    let name = format!("{}({})", file.name, std::str::from_utf8(member.name())?);
                     info!("Parsing {}", name);
                     let obj = object::File::parse(member.data(file.content.as_slice())?)
                         .context(format!("Parsing file {} as object", name))?;
@@ -365,7 +365,11 @@ impl<'a> Linker<'a> {
                                         },
                                     );
                                 }
-                                _ => unimplemented!("{:?}", symbol.kind()),
+                                _ => bail!(
+                                    "Symbol kind is {:?}, symbol section is {:?}",
+                                    symbol.kind(),
+                                    symbol.section(),
+                                ),
                             }
                         }
                     }
