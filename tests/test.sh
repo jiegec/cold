@@ -41,6 +41,9 @@ ld -dynamic-linker /lib64/ld-linux-x86-64.so.2 helloworld3_asm_main.o helloworld
 ln -sf helloworld3_asm_library_cold.so test.so
 ./helloworld3_asm_cold
 [[ $(./helloworld3_asm_cold) =~ "Hello world!" ]] || exit 1
+RUST_LOG=info cargo run -- -dynamic-linker /lib64/ld-linux-x86-64.so.2 helloworld3_asm_main.o helloworld3_asm_library_cold.so -o helloworld3_asm_cold
+./helloworld3_asm_cold
+[[ $(./helloworld3_asm_cold) =~ "Hello world!" ]] || exit 1
 
 # uname_asm
 RUST_LOG=info cargo run -- uname_asm.o -o uname_asm_cold
@@ -53,3 +56,6 @@ RUST_LOG=info cargo run -- bss_asm.o -o bss_asm_cold
 ./bss_asm_cold
 [[ $(./bss_asm_cold) =~ "f" ]] || exit 1
 readelf -a bss_asm_cold > bss_asm_cold.readelf
+
+# TODO:
+#PATH=../target/debug:$PATH gcc helloworld_c.c -o helloworld_c -v --save-temps

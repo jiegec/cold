@@ -1,8 +1,9 @@
 use crate::opt::{FileOpt, ObjectFileOpt, Opt};
 use anyhow::{anyhow, bail, Context};
-use object::elf::Sym64;
+use object::elf::{
+    Sym64, DT_JMPREL, DT_NEEDED, DT_PLTGOT, DT_PLTREL, DT_PLTRELSZ, DT_RELA, R_X86_64_JUMP_SLOT,
+};
 use object::write::elf::*;
-use object::LittleEndian;
 use object::{
     elf::{DT_GNU_HASH, DT_HASH, DT_NULL, DT_SONAME, DT_STRSZ, DT_STRTAB, DT_SYMENT, DT_SYMTAB},
     write::{
@@ -11,6 +12,7 @@ use object::{
     },
     Object, ObjectSection, ObjectSymbol,
 };
+use object::{LittleEndian, ObjectKind};
 use std::{collections::BTreeMap, os::unix::fs::PermissionsExt, path::PathBuf};
 use tracing::{info, info_span, warn};
 use typed_arena::Arena;
@@ -80,7 +82,10 @@ pub enum RelocationTarget {
 pub struct Relocation {
     // offset into the output section
     offset: u64,
-    inner: object::Relocation,
+    kind: object::RelocationKind,
+    encoding: object::RelocationEncoding,
+    size: u8,
+    addend: i64,
     target: RelocationTarget,
 }
 
@@ -96,6 +101,14 @@ pub struct Symbol {
     symbol_name_dynamic_string_id: Option<StringId>,
     // local or global
     is_global: bool,
+    // a plt symbol to dynamic library
+    is_plt: bool,
+}
+
+#[derive(Debug)]
+pub struct DynamicSymbol {
+    name: String,
+    is_plt: bool,
 }
 
 #[derive(Default, Debug)]
@@ -108,10 +121,26 @@ pub struct OutputSection {
     pub relocations: Vec<Relocation>,
     pub is_executable: bool,
     pub is_writable: bool,
+    pub is_bss: bool,
     // indices in output ELF
     pub section_index: Option<SectionIndex>,
     pub name_string_id: Option<StringId>,
-    pub is_bss: bool,
+}
+
+#[derive(Default, Debug)]
+pub struct OutputRelocationSection {
+    pub relocations: Vec<Rel>,
+    // offset from ELF load address
+    pub offset: u64,
+    // indices in output ELF
+    pub name_string_id: Option<StringId>,
+}
+
+#[derive(Default, Debug)]
+pub struct Needed {
+    pub name: String,
+    // indices in output ELF
+    pub name_string_id: Option<StringId>,
 }
 
 struct Linker<'a> {
@@ -123,6 +152,8 @@ struct Linker<'a> {
 
     // symbol table: symbol name => symbol
     symbols: BTreeMap<String, Symbol>,
+    // dynamic symbols sorted by hash bucket
+    dynamic_symbols: Vec<DynamicSymbol>,
 
     // section address => offset
     section_address: BTreeMap<String, u64>,
@@ -133,13 +164,22 @@ struct Linker<'a> {
     load_address: u64,
 
     // dynamic, dynsym, dynstr, hash, gnu_hash
+    dynamic_section_index: SectionIndex,
     dynamic_section_offset: u64,
+    dynsym_section_index: SectionIndex,
     dynsym_section_offset: u64,
     dynstr_section_offset: u64,
     hash_section_offset: u64,
     gnu_hash_section_offset: u64,
     dynamic_entries_count: usize,
     soname_dynamic_string_index: Option<StringId>,
+
+    // dynamically link against shared libraries
+    dynamic_link: bool,
+    needed: Vec<Needed>,
+
+    // output relocations
+    output_relocations: BTreeMap<String, OutputRelocationSection>,
 }
 
 impl<'a> Linker<'a> {
@@ -159,13 +199,19 @@ impl<'a> Linker<'a> {
             section_address: BTreeMap::new(),
             writer: Writer::new(object::Endianness::Little, true, &mut buffer),
             load_address: 0,
+            dynamic_section_index: SectionIndex(0),
             dynamic_section_offset: 0,
             dynamic_entries_count: 0,
+            dynsym_section_index: SectionIndex(0),
             dynsym_section_offset: 0,
             dynstr_section_offset: 0,
             hash_section_offset: 0,
             gnu_hash_section_offset: 0,
             soname_dynamic_string_index: None,
+            dynamic_link: false,
+            needed: vec![],
+            output_relocations: BTreeMap::new(),
+            dynamic_symbols: vec![],
         };
         linker.read_files()?;
         linker.parse_files()?;
@@ -212,9 +258,12 @@ impl<'a> Linker<'a> {
 
     fn parse_files(&mut self) -> anyhow::Result<()> {
         let Linker {
+            opt,
             files,
             output_sections,
             symbols,
+            output_relocations,
+            dynamic_symbols,
             ..
         } = self;
 
@@ -246,6 +295,29 @@ impl<'a> Linker<'a> {
             let _span = info_span!("file", name).entered();
             match obj {
                 object::File::Elf64(elf) => {
+                    if elf.kind() == ObjectKind::Dynamic {
+                        // linked against dynamic library
+                        self.dynamic_link = true;
+                        self.needed.push(Needed {
+                            name: name.clone(),
+                            name_string_id: None,
+                        });
+
+                        // walk through its dynamic symbols
+                        // skip the first symbol which is null
+                        for symbol in elf.dynamic_symbols().skip(1) {
+                            if !symbol.is_undefined() {
+                                let name = symbol.name()?;
+                                info!("Defining dynamic symbol {}", name);
+                                dynamic_symbols.push(DynamicSymbol {
+                                    name: name.to_string(),
+                                    is_plt: true,
+                                });
+                            }
+                        }
+                        continue;
+                    }
+
                     // collect section sizes prior to this object
                     let section_sizes: BTreeMap<String, u64> = output_sections
                         .iter()
@@ -306,7 +378,10 @@ impl<'a> Linker<'a> {
                                             out.relocations.push(Relocation {
                                                 offset: offset
                                                     + *section_sizes.get(name).unwrap_or(&0),
-                                                inner: relocation,
+                                                kind: relocation.kind(),
+                                                encoding: relocation.encoding(),
+                                                size: relocation.size(),
+                                                addend: relocation.addend(),
                                                 target: RelocationTarget::Section((
                                                     target_section_name.to_string(),
                                                     // record current size of section, because there can be existing content in the section from other object file
@@ -326,7 +401,10 @@ impl<'a> Linker<'a> {
                                             out.relocations.push(Relocation {
                                                 offset: offset
                                                     + *section_sizes.get(name).unwrap_or(&0),
-                                                inner: relocation,
+                                                kind: relocation.kind(),
+                                                encoding: relocation.encoding(),
+                                                size: relocation.size(),
+                                                addend: relocation.addend(),
                                                 target: RelocationTarget::Symbol(
                                                     symbol_name.to_string(),
                                                 ),
@@ -362,8 +440,17 @@ impl<'a> Linker<'a> {
                                             symbol_name_string_id: None,
                                             symbol_name_dynamic_string_id: None,
                                             is_global: symbol.is_global(),
+                                            is_plt: false,
                                         },
                                     );
+
+                                    if symbol.is_global() && opt.shared {
+                                        // export GLOBAL symbols in dynsym
+                                        dynamic_symbols.push(DynamicSymbol {
+                                            name: name.to_string(),
+                                            is_plt: false,
+                                        });
+                                    }
                                 }
                                 _ => bail!(
                                     "Symbol kind is {:?}, symbol section is {:?}",
@@ -378,6 +465,193 @@ impl<'a> Linker<'a> {
             }
         }
 
+        if opt.shared || self.dynamic_link {
+            // add _DYNAMIC symbol
+            symbols.insert(
+                "_DYNAMIC".to_string(),
+                Symbol {
+                    section_name: ".dynamic".to_string(),
+                    offset: 0,
+                    symbol_name_string_id: None,
+                    symbol_name_dynamic_string_id: None,
+                    is_global: false,
+                    is_plt: false,
+                },
+            );
+        }
+
+        // handle dynamic symbols: construct .plt, .got.pl
+        if self.dynamic_link {
+            assert!(!output_sections.contains_key(".plt"));
+            let mut plt = OutputSection {
+                name: ".plt".to_string(),
+                is_executable: true,
+                ..OutputSection::default()
+            };
+
+            // first entry in plt:
+            plt.content.extend(vec![
+                // ff 35 xx xx xx xx push .got.plt+8(%rip)
+                0xff, 0x35, 0x00, 0x00, 0x00, 0x00,
+                // ff 25 xx xx xx xx jmp *.got.plt+16(%rip)
+                0xff, 0x25, 0x00, 0x00, 0x00, 0x00, // 0f 1f 40 00       nop
+                0x0f, 0x1f, 0x40, 0x00,
+            ]);
+            // relocation for push .got.plt+8(rip)
+            plt.relocations.push(Relocation {
+                offset: 0x2,
+                kind: object::RelocationKind::Relative,
+                encoding: object::RelocationEncoding::Generic,
+                size: 32,
+                addend: 8 - 4,
+                target: RelocationTarget::Section((".got.plt".to_string(), 0)),
+            });
+            // relocation for jmp *.got.plt+16(%rip)
+            plt.relocations.push(Relocation {
+                offset: 0x8,
+                kind: object::RelocationKind::Relative,
+                encoding: object::RelocationEncoding::Generic,
+                size: 32,
+                addend: 16 - 4,
+                target: RelocationTarget::Section((".got.plt".to_string(), 0)),
+            });
+            output_sections.insert(".plt".to_string(), plt);
+
+            // got contents:
+            assert!(!output_sections.contains_key(".got.plt"));
+            let mut got_plt = OutputSection {
+                name: ".got.plt".to_string(),
+                ..OutputSection::default()
+            };
+            got_plt.content.extend(vec![
+                // 0: address of .dynamic section
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                // 1: 0, reserved for ld.so
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                // 2: 0, reserved for ld.so
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ]);
+            // address of .dynamic section
+            got_plt.relocations.push(Relocation {
+                offset: 0x0,
+                kind: object::RelocationKind::Absolute,
+                encoding: object::RelocationEncoding::Generic,
+                size: 64,
+                addend: 0,
+                target: RelocationTarget::Section((".dynamic".to_string(), 0)),
+            });
+            output_sections.insert(".got.plt".to_string(), got_plt);
+
+            // add _GLOBAL_OFFSET_TABLE_ symbol
+            symbols.insert(
+                "_GLOBAL_OFFSET_TABLE_".to_string(),
+                Symbol {
+                    section_name: ".got.plt".to_string(),
+                    offset: 0,
+                    symbol_name_string_id: None,
+                    symbol_name_dynamic_string_id: None,
+                    is_global: false,
+                    is_plt: false,
+                },
+            );
+
+            // sort dynamic symbols by gnu hash bucket
+            let bucket_count = dynamic_symbols.len();
+            dynamic_symbols.sort_by_key(|sym| {
+                let hash = object::elf::gnu_hash(sym.name.as_bytes());
+                hash % bucket_count as u32
+            });
+
+            for (idx, dyn_sym) in dynamic_symbols.iter().enumerate() {
+                // redirect the symbol to plt
+                let plt = output_sections.get_mut(".plt").unwrap();
+                let plt_offset = plt.content.len() as u64;
+
+                // each entry in plt:
+                // ff 25 xx xx xx xx jmp *.got.plt+yy(%rip)
+                plt.content.extend(vec![0xff, 0x25, 0x00, 0x00, 0x00, 0x00]);
+                // 68 xx xx xx xx    push index
+                plt.content.push(0x68);
+                plt.content.extend_from_slice(&(idx as u32).to_le_bytes());
+                // e9 xx xx xx xx    jmp plt_first_entry
+                plt.content.extend(vec![0xe9, 0x00, 0x00, 0x00, 0x00]);
+
+                // relocation for jmp *.got.plt+yy(%rip)
+                plt.relocations.push(Relocation {
+                    offset: 0x2 + plt_offset,
+                    kind: object::RelocationKind::Relative,
+                    encoding: object::RelocationEncoding::Generic,
+                    size: 32,
+                    // each got entry: 8 bytes
+                    // 24: got header
+                    addend: (idx as i64 * 8 + 24) - 4,
+                    target: RelocationTarget::Section((".got.plt".to_string(), 0)),
+                });
+                // relocation for jmp plt_first_entry
+                plt.relocations.push(Relocation {
+                    offset: 12 + plt_offset,
+                    kind: object::RelocationKind::Relative,
+                    encoding: object::RelocationEncoding::Generic,
+                    size: 32,
+                    addend: 0 - 4,
+                    target: RelocationTarget::Section((".plt".to_string(), 0)),
+                });
+
+                // add entry in .got.plt
+                let got_plt = output_sections.get_mut(".got.plt").unwrap();
+                let got_offset = got_plt.content.len() as u64;
+                // 8 bytes for absolute address
+                got_plt.content.extend(vec![0; 8]);
+
+                // static relocation to the next instruction in plt in binary
+                got_plt.relocations.push(Relocation {
+                    offset: got_offset,
+                    kind: object::RelocationKind::Absolute,
+                    encoding: object::RelocationEncoding::Generic,
+                    size: 64,
+                    addend: plt_offset as i64 + 6, // point to push index
+                    target: RelocationTarget::Section((".plt".to_string(), 0)),
+                });
+
+                // add dynamic relocation R_X86_64_JUMP_SLOT to actual symbol
+                output_relocations
+                    .entry(".rela.plt".to_string())
+                    .or_default()
+                    .relocations
+                    .push(Rel {
+                        r_offset: got_offset,
+                        r_sym: (idx + 1) as u32,
+                        r_type: R_X86_64_JUMP_SLOT,
+                        r_addend: 0,
+                    });
+
+                symbols.insert(
+                    dyn_sym.name.clone(),
+                    Symbol {
+                        section_name: ".plt".to_string(),
+                        offset: plt_offset,
+                        symbol_name_string_id: None,
+                        symbol_name_dynamic_string_id: None,
+                        is_global: true,
+                        is_plt: true,
+                    },
+                );
+            }
+        }
+
+        if !opt.shared && self.dynamic_link {
+            let mut interp = OutputSection {
+                name: ".interp".to_string(),
+                ..OutputSection::default()
+            };
+            interp
+                .content
+                .extend_from_slice(opt.dynamic_linker.as_ref().unwrap().as_bytes());
+            // NULL terminated string
+            interp.content.push(0);
+            output_sections.insert(".interp".to_string(), interp);
+        }
+
         Ok(())
     }
 
@@ -386,7 +660,11 @@ impl<'a> Linker<'a> {
             opt,
             output_sections,
             symbols,
+            dynamic_symbols,
             writer,
+            output_relocations,
+            dynamic_section_index,
+            dynsym_section_index,
             ..
         } = self;
 
@@ -397,19 +675,31 @@ impl<'a> Linker<'a> {
         // the first page is reserved for ELF header & program header
         writer.reserve_file_header();
         // for simplicity, use one segment to map them all
-        writer.reserve_program_headers(if opt.shared {
-            // PT_LOAD + PT_DYNAMIC
-            2
-        } else {
-            // PT_LOAD
-            1
-        });
+        let mut program_headers_count = 1; // PT_LOAD
+        if opt.shared || self.dynamic_link {
+            // PT_DYNAMIC
+            program_headers_count += 1;
+        }
+        if !opt.shared && self.dynamic_link {
+            // PT_INTERP
+            program_headers_count += 1;
+        }
+        writer.reserve_program_headers(program_headers_count);
 
         // thus sections begin at 0x401000
         for (_name, output_section) in output_sections.iter_mut() {
             output_section.offset = writer.reserve(output_section.content.len(), 4096) as u64;
         }
         info!("Got {} output sections", output_sections.len());
+
+        // reserve .rela.xx sections
+        for (_name, output_section) in output_relocations.iter_mut() {
+            output_section.offset = writer.reserve(
+                output_section.relocations.len()
+                    * std::mem::size_of::<object::elf::Rela64<LittleEndian>>(),
+                8,
+            ) as u64;
+        }
 
         // reserve section headers
         writer.reserve_null_section_index();
@@ -419,13 +709,18 @@ impl<'a> Linker<'a> {
                 Some(writer.add_section_name(arena.alloc_str(name).as_bytes()));
             output_section.section_index = Some(writer.reserve_section_index());
         }
+        for (name, output_section) in output_relocations.iter_mut() {
+            output_section.name_string_id =
+                Some(writer.add_section_name(arena.alloc_str(name).as_bytes()));
+            writer.reserve_section_index();
+        }
         let _symtab_section_index = writer.reserve_symtab_section_index();
         let _strtab_section_index = writer.reserve_strtab_section_index();
         let _shstrtab_section_index = writer.reserve_shstrtab_section_index();
-        if opt.shared {
+        if opt.shared || self.dynamic_link {
             // .dynamic, .dynsym, .dynstr, .hash, .gnu_hash
-            let _dynamic_section_index = writer.reserve_dynamic_section_index();
-            let _dynsym_section_index = writer.reserve_dynsym_section_index();
+            *dynamic_section_index = writer.reserve_dynamic_section_index();
+            *dynsym_section_index = writer.reserve_dynsym_section_index();
             let _dynstr_section_index = writer.reserve_dynstr_section_index();
             if opt.hash_style.sysv {
                 let _hash_section_index = writer.reserve_hash_section_index();
@@ -451,7 +746,7 @@ impl<'a> Linker<'a> {
 
         // reserve dynamic, dynsym, dynstr, hash and gnu_hash
         self.dynamic_entries_count = 5;
-        if opt.shared {
+        if opt.shared || self.dynamic_link {
             // dynamic entries:
             // 1. HASH -> .hash
             // 2. GNU_HASH -> .gnu_hash
@@ -460,7 +755,12 @@ impl<'a> Linker<'a> {
             // 5. STRSZ
             // 6. SYMENT
             // 7. SONAME
-            // 8. NULL
+            // 8. PLTGOT -> .got.plt
+            // 9. PLTRELSZ
+            // 10. PLTREL
+            // 11. JMPREL -> .rela.plt
+            // 12. NEEDED
+            // 13. NULL
             if opt.hash_style.sysv {
                 self.dynamic_entries_count += 1;
             }
@@ -470,21 +770,22 @@ impl<'a> Linker<'a> {
             if opt.soname.is_some() {
                 self.dynamic_entries_count += 1;
             }
+            if self.dynamic_link {
+                // PLTGOT, PLTRELSZ, PLTREL, JMPREL
+                self.dynamic_entries_count += 4;
+            }
+            self.dynamic_entries_count += self.needed.len();
 
             // align to 8 bytes boundary
             self.dynamic_section_offset = writer.reserve_dynamic(self.dynamic_entries_count) as u64;
 
             // dynamic symbols
             writer.reserve_null_dynamic_symbol_index();
-            let mut dyn_symbols_count = 0;
-            for (symbol_name, symbol) in symbols.iter_mut() {
-                if symbol.is_global {
-                    // only consider global symbols
-                    symbol.symbol_name_dynamic_string_id =
-                        Some(writer.add_dynamic_string(arena.alloc_str(symbol_name).as_bytes()));
-                    writer.reserve_dynamic_symbol_index();
-                    dyn_symbols_count += 1;
-                }
+            for dyn_sym in dynamic_symbols.iter() {
+                let symbol = symbols.get_mut(&dyn_sym.name).unwrap();
+                symbol.symbol_name_dynamic_string_id =
+                    Some(writer.add_dynamic_string(arena.alloc_str(&dyn_sym.name).as_bytes()));
+                writer.reserve_dynamic_symbol_index();
             }
 
             if let Some(soname) = &opt.soname {
@@ -492,22 +793,28 @@ impl<'a> Linker<'a> {
                     Some(writer.add_dynamic_string(arena.alloc_str(soname).as_bytes()))
             };
 
+            for needed in &mut self.needed {
+                needed.name_string_id =
+                    Some(writer.add_dynamic_string(arena.alloc_str(&needed.name).as_bytes()));
+            }
+
             self.dynsym_section_offset = writer.reserve_dynsym() as u64;
 
             // dynamic string
             self.dynstr_section_offset = writer.reserve_dynstr() as u64;
 
             // hash table
+            let dynamic_symbols_count = dynamic_symbols.len() as u32;
             if opt.hash_style.sysv {
                 // chain count: 1 extra element for NULL symbol
                 self.hash_section_offset =
-                    writer.reserve_hash(dyn_symbols_count, dyn_symbols_count + 1) as u64;
+                    writer.reserve_hash(dynamic_symbols_count, dynamic_symbols_count + 1) as u64;
             }
 
             // gnu hash table
             if opt.hash_style.gnu {
                 self.gnu_hash_section_offset =
-                    writer.reserve_gnu_hash(1, dyn_symbols_count, dyn_symbols_count) as u64;
+                    writer.reserve_gnu_hash(1, dynamic_symbols_count, dynamic_symbols_count) as u64;
             }
         };
 
@@ -518,7 +825,9 @@ impl<'a> Linker<'a> {
         let Linker {
             opt,
             output_sections,
+            output_relocations,
             symbols,
+            dynamic_symbols,
             writer,
             soname_dynamic_string_index,
             section_address,
@@ -561,13 +870,13 @@ impl<'a> Linker<'a> {
             p_memsz: writer.reserved_len() as u64,
             p_align: 4096,
         });
-        if opt.shared {
+        if opt.shared || self.dynamic_link {
             writer.write_program_header(&ProgramHeader {
                 p_type: object::elf::PT_DYNAMIC,
                 p_flags: object::elf::PF_W | object::elf::PF_R,
                 p_offset: self.dynamic_section_offset,
-                p_vaddr: self.dynamic_section_offset,
-                p_paddr: self.dynamic_section_offset,
+                p_vaddr: self.dynamic_section_offset + self.load_address,
+                p_paddr: self.dynamic_section_offset + self.load_address,
                 p_filesz: (self.dynamic_entries_count
                     * std::mem::size_of::<object::elf::Dyn64<object::LittleEndian>>())
                     as u64,
@@ -577,11 +886,32 @@ impl<'a> Linker<'a> {
                 p_align: 8,
             });
         }
+        if !opt.shared && self.dynamic_link {
+            writer.write_program_header(&ProgramHeader {
+                p_type: object::elf::PT_INTERP,
+                p_flags: object::elf::PF_R,
+                p_offset: output_sections[".interp"].offset,
+                p_vaddr: section_address[".interp"],
+                p_paddr: section_address[".interp"],
+                p_filesz: output_sections[".interp"].content.len() as u64,
+                p_memsz: output_sections[".interp"].content.len() as u64,
+                p_align: 1,
+            });
+        }
 
         // write section data
         for (_name, output_section) in output_sections.iter() {
             writer.pad_until(output_section.offset as usize);
             writer.write(&output_section.content);
+        }
+        for (_name, output_section) in output_relocations.iter() {
+            writer.pad_until(output_section.offset as usize);
+            for rel in &output_section.relocations {
+                // turn offset into absolute
+                let mut rel = rel.clone();
+                rel.r_offset += self.load_address;
+                writer.write_relocation(true, &rel);
+            }
         }
 
         // write section headers
@@ -612,20 +942,44 @@ impl<'a> Linker<'a> {
                 sh_entsize: 0,
             });
         }
+        for (name, output_section) in output_relocations.iter() {
+            let flags = object::elf::SHF_ALLOC | object::elf::SHF_INFO_LINK;
+
+            let entsize = std::mem::size_of::<object::elf::Rela64<LittleEndian>>();
+            writer.write_section_header(&SectionHeader {
+                name: output_section.name_string_id,
+                sh_type: object::elf::SHT_RELA,
+                sh_flags: flags as u64,
+                sh_addr: section_address[name],
+                sh_offset: output_section.offset,
+                sh_size: (output_section.relocations.len() * entsize) as u64,
+                sh_link: self.dynsym_section_index.0, // associated to .dynsym
+                sh_info: output_sections
+                    .get(".got.plt")
+                    .unwrap()
+                    .section_index
+                    .unwrap()
+                    .0,
+                sh_addralign: 8,
+                sh_entsize: entsize as u64,
+            });
+        }
         writer.write_symtab_section_header(
             1 + symbols.iter().filter(|(_name, sym)| !sym.is_global).count() as u32,
         ); // +1: one extra null symbol at the beginning
         writer.write_strtab_section_header();
         writer.write_shstrtab_section_header();
-        if opt.shared {
-            writer.write_dynamic_section_header(self.dynamic_section_offset);
-            writer.write_dynsym_section_header(self.dynsym_section_offset, 1); // one local: null symbol
-            writer.write_dynstr_section_header(self.dynstr_section_offset);
+        if opt.shared || self.dynamic_link {
+            writer.write_dynamic_section_header(self.dynamic_section_offset + self.load_address);
+            writer.write_dynsym_section_header(self.dynsym_section_offset + self.load_address, 1); // one local: null symbol
+            writer.write_dynstr_section_header(self.dynstr_section_offset + self.load_address);
             if opt.hash_style.sysv {
-                writer.write_hash_section_header(self.hash_section_offset);
+                writer.write_hash_section_header(self.hash_section_offset + self.load_address);
             }
             if opt.hash_style.gnu {
-                writer.write_gnu_hash_section_header(self.gnu_hash_section_offset);
+                writer.write_gnu_hash_section_header(
+                    self.gnu_hash_section_offset + self.load_address,
+                );
             }
         }
 
@@ -638,7 +992,13 @@ impl<'a> Linker<'a> {
             let address = section_address[&symbol.section_name] + symbol.offset;
             writer.write_symbol(&Sym {
                 name: symbol.symbol_name_string_id,
-                section: output_sections[&symbol.section_name].section_index,
+                section: if symbol.is_plt {
+                    None // UNDEF
+                } else if symbol.section_name == ".dynamic" {
+                    Some(self.dynamic_section_index)
+                } else {
+                    output_sections[&symbol.section_name].section_index
+                },
                 st_info: if symbol.is_global {
                     (object::elf::STB_GLOBAL) << 4
                 } else {
@@ -646,7 +1006,7 @@ impl<'a> Linker<'a> {
                 },
                 st_other: 0,
                 st_shndx: 0,
-                st_value: address,
+                st_value: if symbol.is_plt { 0 } else { address },
                 st_size: 0,
             });
         }
@@ -657,8 +1017,8 @@ impl<'a> Linker<'a> {
         // write section string table
         writer.write_shstrtab();
 
-        // shared library
-        if opt.shared {
+        // shared library or dynamic linking
+        if opt.shared || self.dynamic_link {
             // dynamic entries:
             // 1. HASH -> .hash
             // 2. GNU_HASH -> .gnu_hash
@@ -667,48 +1027,63 @@ impl<'a> Linker<'a> {
             // 5. STRSZ
             // 6. SYMENT
             // 7. SONAME
-            // 8. NULL
+            // 8. PLTGOT -> .got.plt
+            // 9. PLTRELSZ
+            // 10. PLTREL
+            // 11. JMPREL -> .rela.plt
+            // 12. NEEDED
+            // 13. NULL
             writer.write_align_dynamic();
             if opt.hash_style.sysv {
-                writer.write_dynamic(DT_HASH, self.hash_section_offset);
+                writer.write_dynamic(DT_HASH, self.hash_section_offset + self.load_address);
             }
             if opt.hash_style.gnu {
-                writer.write_dynamic(DT_GNU_HASH, self.gnu_hash_section_offset);
+                writer.write_dynamic(
+                    DT_GNU_HASH,
+                    self.gnu_hash_section_offset + self.load_address,
+                );
             }
-            writer.write_dynamic(DT_STRTAB, self.dynstr_section_offset);
-            writer.write_dynamic(DT_SYMTAB, self.dynsym_section_offset);
+            writer.write_dynamic(DT_STRTAB, self.dynstr_section_offset + self.load_address);
+            writer.write_dynamic(DT_SYMTAB, self.dynsym_section_offset + self.load_address);
             let strsz = writer.dynstr_len() as u64;
             writer.write_dynamic(DT_STRSZ, strsz); // size of dynamic string table
             writer.write_dynamic(DT_SYMENT, std::mem::size_of::<Sym64<LittleEndian>>() as u64); // entry size
             if let Some(soname_dynamic_string_index) = &soname_dynamic_string_index {
                 writer.write_dynamic_string(DT_SONAME, *soname_dynamic_string_index);
             }
-            writer.write_dynamic(DT_NULL, 0);
-
-            // sort symbols by gnu hash bucket: this is required for later gnu hash table to work
-            let mut dyn_symbols = vec![];
-            for (symbol_name, symbol) in symbols {
-                if symbol.is_global {
-                    dyn_symbols.push((symbol_name, symbol));
-                }
+            if self.dynamic_link {
+                writer.write_dynamic(DT_PLTGOT, section_address[".got.plt"]);
+                writer.write_dynamic(
+                    DT_PLTRELSZ,
+                    (output_relocations[".rela.plt"].relocations.len()
+                        * std::mem::size_of::<object::elf::Rela64<LittleEndian>>())
+                        as u64,
+                );
+                writer.write_dynamic(DT_PLTREL, DT_RELA as u64);
+                writer.write_dynamic(DT_JMPREL, section_address[".rela.plt"]);
             }
-            let bucket_count = dyn_symbols.len();
-            dyn_symbols.sort_by_key(|(name, _sym)| {
-                let hash = object::elf::gnu_hash(name.as_bytes());
-                hash % bucket_count as u32
-            });
+            for needed in &self.needed {
+                writer.write_dynamic_string(DT_NEEDED, needed.name_string_id.unwrap());
+            }
+
+            writer.write_dynamic(DT_NULL, 0);
 
             // write dynamic symbols
             writer.write_null_dynamic_symbol();
-            for (_symbol_name, symbol) in &dyn_symbols {
+            for dyn_sym in dynamic_symbols.iter() {
+                let symbol = symbols.get(&dyn_sym.name).unwrap();
                 let address = section_address[&symbol.section_name] + symbol.offset;
                 writer.write_dynamic_symbol(&Sym {
                     name: symbol.symbol_name_dynamic_string_id,
-                    section: output_sections[&symbol.section_name].section_index,
+                    section: if symbol.is_plt {
+                        None
+                    } else {
+                        output_sections[&symbol.section_name].section_index
+                    },
                     st_info: (object::elf::STB_GLOBAL) << 4,
                     st_other: 0,
                     st_shndx: 0,
-                    st_value: address,
+                    st_value: if symbol.is_plt { 0 } else { address },
                     st_size: 0,
                 });
             }
@@ -719,8 +1094,8 @@ impl<'a> Linker<'a> {
             // write hash table
             if opt.hash_style.sysv {
                 writer.write_hash(
-                    dyn_symbols.len() as u32,
-                    dyn_symbols.len() as u32 + 1, // + 1 for NULL symbol at start
+                    dynamic_symbols.len() as u32,
+                    dynamic_symbols.len() as u32 + 1, // + 1 for NULL symbol at start
                     |idx| {
                         // compute sysv hash of symbol name
                         // 0 is reserved for null, skip
@@ -728,7 +1103,7 @@ impl<'a> Linker<'a> {
                             None
                         } else {
                             Some(object::elf::hash(
-                                dyn_symbols[idx as usize - 1].0.as_bytes(),
+                                dynamic_symbols[idx as usize - 1].name.as_bytes(),
                             ))
                         }
                     },
@@ -741,11 +1116,11 @@ impl<'a> Linker<'a> {
                     1, // must be at least one to skip the first NULL symbol
                     1,
                     1,
-                    dyn_symbols.len() as u32,
-                    dyn_symbols.len() as u32,
+                    dynamic_symbols.len() as u32,
+                    dynamic_symbols.len() as u32,
                     |idx| {
                         // compute gnu hash of symbol name
-                        object::elf::gnu_hash(dyn_symbols[idx as usize].0.as_bytes())
+                        object::elf::gnu_hash(dynamic_symbols[idx as usize].name.as_bytes())
                     },
                 );
             }
@@ -756,7 +1131,9 @@ impl<'a> Linker<'a> {
 
     fn relocate(&mut self) -> anyhow::Result<()> {
         let Linker {
+            opt,
             output_sections,
+            output_relocations,
             symbols,
             section_address,
             ..
@@ -765,6 +1142,15 @@ impl<'a> Linker<'a> {
         // compute mapping from section name to virtual address
         for (name, output_section) in output_sections.iter() {
             section_address.insert(name.clone(), output_section.offset + self.load_address);
+        }
+        for (name, output_section) in output_relocations.iter() {
+            section_address.insert(name.clone(), output_section.offset + self.load_address);
+        }
+        if opt.shared || self.dynamic_link {
+            section_address.insert(
+                ".dynamic".to_string(),
+                self.load_address + self.dynamic_section_offset,
+            );
         }
 
         // compute relocation
@@ -787,15 +1173,11 @@ impl<'a> Linker<'a> {
                 // symbol
                 let s = target_address as i64;
                 // addend
-                let a = relocation.inner.addend();
+                let a = relocation.addend;
                 // pc
                 let p = self.load_address + output_section.offset + relocation.offset;
 
-                match (
-                    relocation.inner.kind(),
-                    relocation.inner.encoding(),
-                    relocation.inner.size(),
-                ) {
+                match (relocation.kind, relocation.encoding, relocation.size) {
                     // R_X86_64_64
                     (object::RelocationKind::Absolute, object::RelocationEncoding::Generic, 64) => {
                         info!("Relocation type is R_X86_64_64");
