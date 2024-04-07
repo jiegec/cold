@@ -45,6 +45,16 @@ RUST_LOG=info cargo run -- -dynamic-linker /lib64/ld-linux-x86-64.so.2 helloworl
 ./helloworld3_asm_cold
 [[ $(./helloworld3_asm_cold) =~ "Hello world!" ]] || exit 1
 
+# helloworld4_asm
+as helloworld4_asm_syscall.s -o helloworld4_asm_syscall.o
+RUST_LOG=info cargo run -- -shared helloworld4_asm_syscall.o -o libhelloworld4_asm_syscall_cold.so
+as helloworld4_asm_library.s -o helloworld4_asm_library.o
+RUST_LOG=info cargo run -- -shared helloworld4_asm_library.o -L. -lhelloworld4_asm_syscall_cold -o libhelloworld4_asm_library_cold.so
+as helloworld4_asm_main.s -o helloworld4_asm_main.o
+RUST_LOG=info cargo run -- -dynamic-linker /lib64/ld-linux-x86-64.so.2 helloworld4_asm_main.o -L. -lhelloworld4_asm_library_cold -o helloworld4_asm_cold
+./helloworld4_asm_cold
+[[ $(./helloworld4_asm_cold) =~ "Hello world!" ]] || exit 1
+
 # uname_asm
 RUST_LOG=info cargo run -- uname_asm.o -o uname_asm_cold
 ./uname_asm_cold

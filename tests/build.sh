@@ -1,4 +1,5 @@
 #!/bin/sh
+set -x -e
 
 # helloworld_asm
 as helloworld_asm.s -o helloworld_asm.o
@@ -25,6 +26,14 @@ ld -shared helloworld3_asm_library.o -o helloworld3_asm_library.so
 as helloworld3_asm_main.s -o helloworld3_asm_main.o
 ld -dynamic-linker /lib64/ld-linux-x86-64.so.2 helloworld3_asm_main.o helloworld3_asm_library.so -o helloworld3_asm
 ld -pie -dynamic-linker /lib64/ld-linux-x86-64.so.2 helloworld3_asm_main.o helloworld3_asm_library.so -o helloworld3_asm_pie
+
+# helloworld4_asm
+as helloworld4_asm_syscall.s -o helloworld4_asm_syscall.o
+ld -shared helloworld4_asm_syscall.o -o libhelloworld4_asm_syscall.so
+as helloworld4_asm_library.s -o helloworld4_asm_library.o
+ld -shared helloworld4_asm_library.o -L. -lhelloworld4_asm_syscall -o libhelloworld4_asm_library.so
+as helloworld4_asm_main.s -o helloworld4_asm_main.o
+ld -dynamic-linker /lib64/ld-linux-x86-64.so.2 helloworld4_asm_main.o -rpath-link . -L. -lhelloworld4_asm_library -o helloworld4_asm
 
 # uname_asm
 as uname_asm.s -o uname_asm.o

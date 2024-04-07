@@ -105,10 +105,9 @@ pub struct Symbol {
     is_plt: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DynamicSymbol {
     name: String,
-    is_plt: bool,
 }
 
 #[derive(Default, Debug)]
@@ -152,7 +151,11 @@ struct Linker<'a> {
 
     // symbol table: symbol name => symbol
     symbols: BTreeMap<String, Symbol>,
-    // dynamic symbols sorted by hash bucket
+
+    // dynamic symbols are saved in two parts:
+    // plt dynamic symbols that are UNDEF
+    plt_dynamic_symbols: Vec<DynamicSymbol>,
+    // other defined dynamic symbols, sorted by hash bucket
     dynamic_symbols: Vec<DynamicSymbol>,
 
     // section address => offset
@@ -212,6 +215,7 @@ impl<'a> Linker<'a> {
             needed: vec![],
             output_relocations: BTreeMap::new(),
             dynamic_symbols: vec![],
+            plt_dynamic_symbols: vec![],
         };
         linker.read_files()?;
         linker.parse_files()?;
@@ -264,6 +268,7 @@ impl<'a> Linker<'a> {
             symbols,
             output_relocations,
             dynamic_symbols,
+            plt_dynamic_symbols,
             ..
         } = self;
 
@@ -309,9 +314,8 @@ impl<'a> Linker<'a> {
                             if !symbol.is_undefined() {
                                 let name = symbol.name()?;
                                 info!("Defining dynamic symbol {}", name);
-                                dynamic_symbols.push(DynamicSymbol {
+                                plt_dynamic_symbols.push(DynamicSymbol {
                                     name: name.to_string(),
-                                    is_plt: true,
                                 });
                             }
                         }
@@ -448,7 +452,6 @@ impl<'a> Linker<'a> {
                                         // export GLOBAL symbols in dynsym
                                         dynamic_symbols.push(DynamicSymbol {
                                             name: name.to_string(),
-                                            is_plt: false,
                                         });
                                     }
                                 }
@@ -480,7 +483,14 @@ impl<'a> Linker<'a> {
             );
         }
 
-        // handle dynamic symbols: construct .plt, .got.pl
+        // sort dynamic symbols by gnu hash bucket
+        let bucket_count = dynamic_symbols.len();
+        dynamic_symbols.sort_by_key(|sym| {
+            let hash = object::elf::gnu_hash(sym.name.as_bytes());
+            hash % bucket_count as u32
+        });
+
+        // handle dynamic symbols: construct .plt, .got.plt
         if self.dynamic_link {
             assert!(!output_sections.contains_key(".plt"));
             let mut plt = OutputSection {
@@ -555,14 +565,7 @@ impl<'a> Linker<'a> {
                 },
             );
 
-            // sort dynamic symbols by gnu hash bucket
-            let bucket_count = dynamic_symbols.len();
-            dynamic_symbols.sort_by_key(|sym| {
-                let hash = object::elf::gnu_hash(sym.name.as_bytes());
-                hash % bucket_count as u32
-            });
-
-            for (idx, dyn_sym) in dynamic_symbols.iter().enumerate() {
+            for (idx, dyn_sym) in plt_dynamic_symbols.iter().enumerate() {
                 // redirect the symbol to plt
                 let plt = output_sections.get_mut(".plt").unwrap();
                 let plt_offset = plt.content.len() as u64;
@@ -661,6 +664,7 @@ impl<'a> Linker<'a> {
             output_sections,
             symbols,
             dynamic_symbols,
+            plt_dynamic_symbols,
             writer,
             output_relocations,
             dynamic_section_index,
@@ -781,7 +785,7 @@ impl<'a> Linker<'a> {
 
             // dynamic symbols
             writer.reserve_null_dynamic_symbol_index();
-            for dyn_sym in dynamic_symbols.iter() {
+            for dyn_sym in plt_dynamic_symbols.iter().chain(dynamic_symbols.iter()) {
                 let symbol = symbols.get_mut(&dyn_sym.name).unwrap();
                 symbol.symbol_name_dynamic_string_id =
                     Some(writer.add_dynamic_string(arena.alloc_str(&dyn_sym.name).as_bytes()));
@@ -804,15 +808,19 @@ impl<'a> Linker<'a> {
             self.dynstr_section_offset = writer.reserve_dynstr() as u64;
 
             // hash table
+            let plt_dynamic_symbols_count = plt_dynamic_symbols.len() as u32;
             let dynamic_symbols_count = dynamic_symbols.len() as u32;
             if opt.hash_style.sysv {
                 // chain count: 1 extra element for NULL symbol
-                self.hash_section_offset =
-                    writer.reserve_hash(dynamic_symbols_count, dynamic_symbols_count + 1) as u64;
+                self.hash_section_offset = writer.reserve_hash(
+                    plt_dynamic_symbols_count + dynamic_symbols_count,
+                    plt_dynamic_symbols_count + dynamic_symbols_count + 1,
+                ) as u64;
             }
 
             // gnu hash table
             if opt.hash_style.gnu {
+                // plt dynamic symbols are not included in gnu hash table
                 self.gnu_hash_section_offset =
                     writer.reserve_gnu_hash(1, dynamic_symbols_count, dynamic_symbols_count) as u64;
             }
@@ -828,6 +836,7 @@ impl<'a> Linker<'a> {
             output_relocations,
             symbols,
             dynamic_symbols,
+            plt_dynamic_symbols,
             writer,
             soname_dynamic_string_index,
             section_address,
@@ -909,7 +918,7 @@ impl<'a> Linker<'a> {
             for rel in &output_section.relocations {
                 // turn offset into absolute
                 let mut rel = rel.clone();
-                rel.r_offset += self.load_address;
+                rel.r_offset += section_address[".got.plt"];
                 writer.write_relocation(true, &rel);
             }
         }
@@ -1070,7 +1079,7 @@ impl<'a> Linker<'a> {
 
             // write dynamic symbols
             writer.write_null_dynamic_symbol();
-            for dyn_sym in dynamic_symbols.iter() {
+            for dyn_sym in plt_dynamic_symbols.iter().chain(dynamic_symbols.iter()) {
                 let symbol = symbols.get(&dyn_sym.name).unwrap();
                 let address = section_address[&symbol.section_name] + symbol.offset;
                 writer.write_dynamic_symbol(&Sym {
@@ -1094,16 +1103,21 @@ impl<'a> Linker<'a> {
             // write hash table
             if opt.hash_style.sysv {
                 writer.write_hash(
-                    dynamic_symbols.len() as u32,
-                    dynamic_symbols.len() as u32 + 1, // + 1 for NULL symbol at start
+                    (plt_dynamic_symbols.len() + dynamic_symbols.len()) as u32,
+                    (plt_dynamic_symbols.len() + dynamic_symbols.len()) as u32 + 1, // + 1 for NULL symbol at start
                     |idx| {
                         // compute sysv hash of symbol name
                         // 0 is reserved for null, skip
                         if idx == 0 {
                             None
+                        } else if idx <= plt_dynamic_symbols.len() as u32 {
+                            // UNDEF
+                            None
                         } else {
                             Some(object::elf::hash(
-                                dynamic_symbols[idx as usize - 1].name.as_bytes(),
+                                dynamic_symbols[idx as usize - 1 - plt_dynamic_symbols.len()]
+                                    .name
+                                    .as_bytes(),
                             ))
                         }
                     },
@@ -1113,7 +1127,7 @@ impl<'a> Linker<'a> {
             // write gnu hash table
             if opt.hash_style.gnu {
                 writer.write_gnu_hash(
-                    1, // must be at least one to skip the first NULL symbol
+                    1 + plt_dynamic_symbols.len() as u32, // skip NULL symbol and plt UNDEF symbols
                     1,
                     1,
                     dynamic_symbols.len() as u32,
