@@ -69,3 +69,10 @@ readelf -a bss_asm_cold > bss_asm_cold.readelf
 
 # TODO:
 #PATH=../target/debug:$PATH gcc helloworld_c.c -o helloworld_c -v --save-temps
+
+# helloworld4_c
+RUST_LOG=info PATH=../target/debug:$PATH gcc -shared -nostdlib helloworld4_asm_syscall.s -o libhelloworld4_c_syscall_cold.so
+RUST_LOG=info PATH=../target/debug:$PATH gcc -shared -nostdlib helloworld4_c_library.c -L. -lhelloworld4_c_syscall_cold -o libhelloworld4_c_library_cold.so
+RUST_LOG=info PATH=../target/debug:$PATH gcc -nostdlib helloworld4_c_main.c -L. -lhelloworld4_c_library_cold -o helloworld4_c_cold
+./helloworld4_c_cold
+[[ $(./helloworld4_c_cold) =~ "Hello world!" ]] || exit 1

@@ -44,3 +44,11 @@ readelf -a uname_asm > uname_asm.readelf
 as bss_asm.s -o bss_asm.o
 ld bss_asm.o -o bss_asm
 readelf -a bss_asm > bss_asm.readelf
+
+# helloworld4_c
+as helloworld4_asm_syscall.s -o helloworld4_c_syscall.o
+ld -shared helloworld4_c_syscall.o -o libhelloworld4_c_syscall.so
+gcc -c helloworld4_c_library.c -o helloworld4_c_library.o
+ld -shared helloworld4_c_library.o -L. -lhelloworld4_c_syscall -o libhelloworld4_c_library.so
+gcc -c helloworld4_c_main.c -o helloworld4_c_main.o
+ld -dynamic-linker /lib64/ld-linux-x86-64.so.2 helloworld4_c_main.o -rpath-link . -L. -lhelloworld4_c_library -o helloworld4_c

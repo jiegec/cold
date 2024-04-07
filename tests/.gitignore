@@ -1,5 +1,5 @@
 *
 !.gitignore
 !*.sh
-!*_c.c
+!*_c*.c
 !*_asm*.s
