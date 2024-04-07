@@ -24,7 +24,11 @@ OUT=helloworld_asm \
 	bss_asm.o \
 	bss_asm \
 	bss_asm.readelf \
-	helloworld4_c
+	helloworld4_c \
+	helloworld_asm_cold \
+	helloworld_asm_cold.readelf \
+	helloworld2_asm_cold \
+	helloworld2_asm_cold_rev
 
 all: $(OUT)
 
@@ -73,11 +77,30 @@ uname_asm: uname_asm.o
 bss_asm: bss_asm.o
 	ld bss_asm.o -o bss_asm
 
-libhelloworld4_asm_syscall.so: helloworld4_asm_syscall.o
-	ld -shared helloworld4_asm_syscall.o -o libhelloworld4_asm_syscall.so
-
 libhelloworld4_c_library.so: helloworld4_c_library.o libhelloworld4_asm_syscall.so
 	ld -shared helloworld4_c_library.o -L. -lhelloworld4_asm_syscall -o libhelloworld4_c_library.so
 
 helloworld4_c: libhelloworld4_c_library.so helloworld4_c_main.o
 	ld -dynamic-linker /lib64/ld-linux-x86-64.so.2 helloworld4_c_main.o -rpath-link . -L. -lhelloworld4_c_library -o helloworld4_c
+
+# cold linker
+helloworld_asm_cold: helloworld_asm.o
+	RUST_LOG=info cargo run -- helloworld_asm.o -o helloworld_asm_cold
+
+helloworld2_asm_cold: helloworld2_asm1.o helloworld2_asm2.o
+	RUST_LOG=info cargo run -- helloworld2_asm1.o helloworld2_asm2.o -o helloworld2_asm_cold
+
+helloworld2_asm_cold_rev: helloworld2_asm1.o helloworld2_asm2.o
+	RUST_LOG=info cargo run -- helloworld2_asm2.o helloworld2_asm1.o -o helloworld2_asm_cold_rev
+
+check: all
+	# helloworld_asm
+	./helloworld_asm_cold
+	[[ "$(shell ./helloworld_asm_cold)" == "Hello world!" ]] || exit 1
+
+	# helloworld2_asm
+	./helloworld2_asm_cold
+	[[ "$(shell ./helloworld2_asm_cold)" == "Hello world!" ]] || exit 1
+
+	./helloworld2_asm_cold_rev
+	[[ "$(shell ./helloworld2_asm_cold_rev)" == "Hello world!" ]] || exit 1

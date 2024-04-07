@@ -878,8 +878,37 @@ impl<'a> Linker<'a> {
             e_entry: entry_address,
             e_flags: 0,
         })?;
-        // program header
+
+        // program headers
+        // https://refspecs.linuxbase.org/elf/gabi4+/ch5.pheader.html
         // ask kernel to load segments into memory
+        if !opt.shared && self.dynamic_link {
+            // PT_INTERP The array element specifies the location and size of a
+            // null-terminated path name to invoke as an interpreter. This
+            // segment type is meaningful only for executable files (though it
+            // may occur for shared objects); it may not occur more than once in
+            // a file. If it is present, it must precede any loadable segment
+            // entry. See ``Program Interpreter'' below for more information.
+            writer.write_program_header(&ProgramHeader {
+                p_type: object::elf::PT_INTERP,
+                p_flags: object::elf::PF_R,
+                p_offset: output_sections[".interp"].offset,
+                p_vaddr: section_address[".interp"],
+                p_paddr: section_address[".interp"],
+                p_filesz: output_sections[".interp"].content.len() as u64,
+                p_memsz: output_sections[".interp"].content.len() as u64,
+                p_align: 1,
+            });
+        }
+
+        // PT_LOAD The array element specifies a loadable segment, described by
+        // p_filesz and p_memsz. The bytes from the file are mapped to the
+        // beginning of the memory segment. If the segment's memory size
+        // (p_memsz) is larger than the file size (p_filesz), the ``extra''
+        // bytes are defined to hold the value 0 and to follow the segment's
+        // initialized area. The file size may not be larger than the memory
+        // size. Loadable segment entries in the program header table appear in
+        // ascending order, sorted on the p_vaddr member.
         writer.write_program_header(&ProgramHeader {
             p_type: object::elf::PT_LOAD,
             p_flags: object::elf::PF_X | object::elf::PF_W | object::elf::PF_R,
@@ -891,6 +920,8 @@ impl<'a> Linker<'a> {
             p_align: 4096,
         });
         if opt.shared || self.dynamic_link {
+            // PT_DYNAMIC The array element specifies dynamic linking
+            // information. See ``Dynamic Section'' below for more information.
             writer.write_program_header(&ProgramHeader {
                 p_type: object::elf::PT_DYNAMIC,
                 p_flags: object::elf::PF_W | object::elf::PF_R,
@@ -904,18 +935,6 @@ impl<'a> Linker<'a> {
                     * std::mem::size_of::<object::elf::Dyn64<object::LittleEndian>>())
                     as u64,
                 p_align: 8,
-            });
-        }
-        if !opt.shared && self.dynamic_link {
-            writer.write_program_header(&ProgramHeader {
-                p_type: object::elf::PT_INTERP,
-                p_flags: object::elf::PF_R,
-                p_offset: output_sections[".interp"].offset,
-                p_vaddr: section_address[".interp"],
-                p_paddr: section_address[".interp"],
-                p_filesz: output_sections[".interp"].content.len() as u64,
-                p_memsz: output_sections[".interp"].content.len() as u64,
-                p_align: 1,
             });
         }
 
@@ -1039,7 +1058,8 @@ impl<'a> Linker<'a> {
 
         // shared library or dynamic linking
         if opt.shared || self.dynamic_link {
-            // dynamic entries:
+            // https://refspecs.linuxbase.org/elf/gabi4+/ch5.dynamic.html#dynamic_section
+            // .dynamic section entries:
             // 1. HASH -> .hash
             // 2. GNU_HASH -> .gnu_hash
             // 3. STRTAB -> .dynstr
@@ -1055,6 +1075,9 @@ impl<'a> Linker<'a> {
             // 13. NULL
             writer.write_align_dynamic();
             if opt.hash_style.sysv {
+                // DT_HASH This element holds the address of the symbol hash
+                // table, described in ``Hash Table''. This hash table refers to
+                // the symbol table referenced by the DT_SYMTAB element.
                 writer.write_dynamic(DT_HASH, self.hash_section_offset + self.load_address);
             }
             if opt.hash_style.gnu {
@@ -1063,29 +1086,82 @@ impl<'a> Linker<'a> {
                     self.gnu_hash_section_offset + self.load_address,
                 );
             }
+
+            // DT_STRTAB This element holds the address of the string table,
+            // described in Chapter 4. Symbol names, library names, and other
+            // strings reside in this table.
             writer.write_dynamic(DT_STRTAB, self.dynstr_section_offset + self.load_address);
+
+            // DT_SYMTAB This element holds the address of the symbol table,
+            // described in the first part of this chapter, with Elf32_Sym
+            // entries for the 32-bit class of files and Elf64_Sym entries for
+            // the 64-bit class of files.
             writer.write_dynamic(DT_SYMTAB, self.dynsym_section_offset + self.load_address);
+
+            // DT_STRSZ This element holds the size, in bytes, of the string
+            // table.
             let strsz = writer.dynstr_len() as u64;
             writer.write_dynamic(DT_STRSZ, strsz); // size of dynamic string table
+
+            // DT_SYMENT This element holds the size, in bytes, of a symbol
+            // table entry.
             writer.write_dynamic(DT_SYMENT, std::mem::size_of::<Sym64<LittleEndian>>() as u64); // entry size
+
             if let Some(soname_dynamic_string_index) = &soname_dynamic_string_index {
+                // DT_SONAME This element holds the string table offset of a
+                // null-terminated string, giving the name of the shared object.
+                // The offset is an index into the table recorded in the
+                // DT_STRTAB entry. See ``Shared Object Dependencies'' below for
+                // more information about these names.
                 writer.write_dynamic_string(DT_SONAME, *soname_dynamic_string_index);
             }
+
             if self.dynamic_link {
+                // DT_PLTGOT This element holds an address associated with the
+                // procedure linkage table and/or the global offset table. See
+                // this section in the processor supplement for details.
                 writer.write_dynamic(DT_PLTGOT, section_address[".got.plt"]);
+
+                // DT_PLTRELSZ This element holds the total size, in bytes, of
+                // the relocation entries associated with the procedure linkage
+                // table. If an entry of type DT_JMPREL is present, a
+                // DT_PLTRELSZ must accompany it.
                 writer.write_dynamic(
                     DT_PLTRELSZ,
                     (output_relocations[".rela.plt"].relocations.len()
                         * std::mem::size_of::<object::elf::Rela64<LittleEndian>>())
                         as u64,
                 );
+
+                // DT_PLTREL This member specifies the type of relocation entry
+                // to which the procedure linkage table refers. The d_val member
+                // holds DT_REL or DT_RELA, as appropriate. All relocations in a
+                // procedure linkage table must use the same relocation.
                 writer.write_dynamic(DT_PLTREL, DT_RELA as u64);
+
+                // DT_JMPREL If present, this entry's d_ptr member holds the
+                // address of relocation entries associated solely with the
+                // procedure linkage table. Separating these relocation entries
+                // lets the dynamic linker ignore them during process
+                // initialization, if lazy binding is enabled. If this entry is
+                // present, the related entries of types DT_PLTRELSZ and
+                // DT_PLTREL must also be present.
                 writer.write_dynamic(DT_JMPREL, section_address[".rela.plt"]);
             }
             for needed in &self.needed {
+                // DT_NEEDED This element holds the string table offset of a
+                // null-terminated string, giving the name of a needed library.
+                // The offset is an index into the table recorded in the
+                // DT_STRTAB code. See ``Shared Object Dependencies'' for more
+                // information about these names. The dynamic array may contain
+                // multiple entries with this type. These entries' relative
+                // order is significant, though their relation to entries of
+                // other types is not.
                 writer.write_dynamic_string(DT_NEEDED, needed.name_string_id.unwrap());
             }
 
+            // DT_NULL An entry with a DT_NULL tag marks the end of the _DYNAMIC
+            // array.
             writer.write_dynamic(DT_NULL, 0);
 
             // write dynamic symbols
