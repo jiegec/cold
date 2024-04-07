@@ -219,6 +219,7 @@ impl<'a> Linker<'a> {
         };
         linker.read_files()?;
         linker.parse_files()?;
+        linker.generate_plt()?;
         linker.reserve(&mut arena)?;
         linker.relocate()?;
         linker.write()?;
@@ -266,7 +267,6 @@ impl<'a> Linker<'a> {
             files,
             output_sections,
             symbols,
-            output_relocations,
             dynamic_symbols,
             plt_dynamic_symbols,
             ..
@@ -490,6 +490,30 @@ impl<'a> Linker<'a> {
             hash % bucket_count as u32
         });
 
+        if !opt.shared && self.dynamic_link {
+            let mut interp = OutputSection {
+                name: ".interp".to_string(),
+                ..OutputSection::default()
+            };
+            interp
+                .content
+                .extend_from_slice(opt.dynamic_linker.as_ref().unwrap().as_bytes());
+            // NULL terminated string
+            interp.content.push(0);
+            output_sections.insert(".interp".to_string(), interp);
+        }
+        Ok(())
+    }
+
+    fn generate_plt(&mut self) -> anyhow::Result<()> {
+        let Linker {
+            output_sections,
+            symbols,
+            plt_dynamic_symbols,
+            output_relocations,
+            ..
+        } = self;
+
         // handle dynamic symbols: construct .plt, .got.plt
         if self.dynamic_link {
             assert!(!output_sections.contains_key(".plt"));
@@ -640,19 +664,6 @@ impl<'a> Linker<'a> {
                     },
                 );
             }
-        }
-
-        if !opt.shared && self.dynamic_link {
-            let mut interp = OutputSection {
-                name: ".interp".to_string(),
-                ..OutputSection::default()
-            };
-            interp
-                .content
-                .extend_from_slice(opt.dynamic_linker.as_ref().unwrap().as_bytes());
-            // NULL terminated string
-            interp.content.push(0);
-            output_sections.insert(".interp".to_string(), interp);
         }
 
         Ok(())
