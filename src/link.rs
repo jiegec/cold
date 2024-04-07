@@ -226,7 +226,7 @@ impl<'a> Linker<'a> {
 
         // done, save to file
         let output = linker.opt.output.as_ref().unwrap();
-        info!("Writing to executable {:?}", output);
+        info!("Writing to executable {}", output);
         std::fs::write(output, buffer)?;
 
         // make executable

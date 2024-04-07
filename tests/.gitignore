@@ -3,3 +3,4 @@
 !*.sh
 !*_c*.c
 !*_asm*.s
+!Makefile
