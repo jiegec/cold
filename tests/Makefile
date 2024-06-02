@@ -15,6 +15,7 @@ OUT=helloworld_asm \
 	libhelloworld3_asm_library.so \
 	helloworld3_asm_main.o \
 	helloworld3_asm \
+	helloworld3_asm_cold \
 	helloworld3_asm_pie \
 	helloworld4_asm_syscall.o \
 	libhelloworld4_asm_syscall.so \
@@ -31,7 +32,9 @@ OUT=helloworld_asm \
 	helloworld_asm_cold \
 	helloworld_asm_cold.readelf \
 	helloworld2_asm_cold \
-	helloworld2_asm_cold_rev
+	helloworld2_asm_cold_rev \
+	libhelloworld3_asm_library_cold.so \
+	helloworld3_asm_cold_soname
 
 all: $(OUT)
 
@@ -96,14 +99,30 @@ helloworld2_asm_cold: helloworld2_asm1.o helloworld2_asm2.o
 helloworld2_asm_cold_rev: helloworld2_asm1.o helloworld2_asm2.o
 	RUST_LOG=info cargo run -- helloworld2_asm2.o helloworld2_asm1.o -o helloworld2_asm_cold_rev
 
+libhelloworld3_asm_library_cold.so: helloworld3_asm_library.o
+	RUST_LOG=info cargo run -- -shared helloworld3_asm_library.o -o libhelloworld3_asm_library_cold.so
+
+helloworld3_asm_cold: helloworld3_asm_main.o libhelloworld3_asm_library_cold.so
+	ld -dynamic-linker /lib64/ld-linux-x86-64.so.2 helloworld3_asm_main.o libhelloworld3_asm_library_cold.so -o helloworld3_asm_cold
+
+libhelloworld3_asm_library_cold_soname.so: helloworld3_asm_library.o
+	RUST_LOG=info cargo run -- -soname test.so -shared helloworld3_asm_library.o -o libhelloworld3_asm_library_cold_soname.so
+
+test.so: libhelloworld3_asm_library_cold_soname.so
+	ln -sf libhelloworld3_asm_library_cold_soname.so test.so
+
+helloworld3_asm_cold_soname: helloworld3_asm_main.o libhelloworld3_asm_library_cold_soname.so test.so
+	ld -dynamic-linker /lib64/ld-linux-x86-64.so.2 helloworld3_asm_main.o libhelloworld3_asm_library_cold_soname.so -o helloworld3_asm_cold_soname
+
+check: export LD_LIBRARY_PATH = $(PWD)
 check: all
 	# helloworld_asm
-	./helloworld_asm_cold
-	[[ "$(shell ./helloworld_asm_cold)" == "Hello world!" ]] || exit 1
+	./helloworld_asm_cold | grep -x "Hello world!" || exit 1
 
 	# helloworld2_asm
-	./helloworld2_asm_cold
-	[[ "$(shell ./helloworld2_asm_cold)" == "Hello world!" ]] || exit 1
+	./helloworld2_asm_cold | grep -x "Hello world!" || exit 1
+	./helloworld2_asm_cold_rev | grep -x "Hello world!" || exit 1
 
-	./helloworld2_asm_cold_rev
-	[[ "$(shell ./helloworld2_asm_cold_rev)" == "Hello world!" ]] || exit 1
+	# helloworld3_asm
+	./helloworld3_asm_cold | grep -x "Hello world!" || exit 1
+	./helloworld3_asm_cold_soname | grep -x "Hello world!" || exit 1

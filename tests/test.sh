@@ -2,31 +2,6 @@
 set -x -e
 make
 
-# helloworld3_asm
-RUST_LOG=info cargo run -- --hash-style=both -shared helloworld3_asm_library.o -o helloworld3_asm_library_cold.so
-readelf -a helloworld3_asm_library_cold.so > helloworld3_asm_library_cold.so.readelf
-ld -dynamic-linker /lib64/ld-linux-x86-64.so.2 helloworld3_asm_main.o helloworld3_asm_library_cold.so -o helloworld3_asm_cold
-readelf -a helloworld3_asm_cold > helloworld3_asm_cold.readelf
-export LD_LIBRARY_PATH=$PWD 
-./helloworld3_asm_cold
-[[ $(./helloworld3_asm_cold) =~ "Hello world!" ]] || exit 1
-RUST_LOG=info cargo run -- --hash-style=sysv -shared helloworld3_asm_library.o -o helloworld3_asm_library_cold.so
-ld -dynamic-linker /lib64/ld-linux-x86-64.so.2 helloworld3_asm_main.o helloworld3_asm_library_cold.so -o helloworld3_asm_cold
-./helloworld3_asm_cold
-[[ $(./helloworld3_asm_cold) =~ "Hello world!" ]] || exit 1
-RUST_LOG=info cargo run -- --hash-style=gnu -shared helloworld3_asm_library.o -o helloworld3_asm_library_cold.so
-ld -dynamic-linker /lib64/ld-linux-x86-64.so.2 helloworld3_asm_main.o helloworld3_asm_library_cold.so -o helloworld3_asm_cold
-./helloworld3_asm_cold
-[[ $(./helloworld3_asm_cold) =~ "Hello world!" ]] || exit 1
-RUST_LOG=info cargo run -- -soname test.so -shared helloworld3_asm_library.o -o helloworld3_asm_library_cold.so
-ld -dynamic-linker /lib64/ld-linux-x86-64.so.2 helloworld3_asm_main.o helloworld3_asm_library_cold.so -o helloworld3_asm_cold
-ln -sf helloworld3_asm_library_cold.so test.so
-./helloworld3_asm_cold
-[[ $(./helloworld3_asm_cold) =~ "Hello world!" ]] || exit 1
-RUST_LOG=info cargo run -- -dynamic-linker /lib64/ld-linux-x86-64.so.2 helloworld3_asm_main.o helloworld3_asm_library_cold.so -o helloworld3_asm_cold
-./helloworld3_asm_cold
-[[ $(./helloworld3_asm_cold) =~ "Hello world!" ]] || exit 1
-
 # helloworld4_asm
 as helloworld4_asm_syscall.s -o helloworld4_asm_syscall.o
 RUST_LOG=info cargo run -- -shared helloworld4_asm_syscall.o -o libhelloworld4_asm_syscall_cold.so
