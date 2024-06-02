@@ -4,4 +4,4 @@ test:
     - apt update
     - apt install -y build-essential
     - cargo test
-    - cd tests && ./test.sh
+    - make -C tests check
