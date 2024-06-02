@@ -1,3 +1,6 @@
+# https://stackoverflow.com/questions/589276/how-can-i-use-bash-syntax-in-makefile-targets
+SHELL := /bin/bash
+
 OUT=helloworld_asm \
 	helloworld_asm.o.readelf \
 	helloworld_asm.readelf \
