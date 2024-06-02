@@ -151,6 +151,10 @@ pub fn parse_opts(args: &[String]) -> anyhow::Result<Opt> {
             "-static" => {
                 cur_opt_stack.link_static = true;
             }
+            "-z" => {
+                // skip -z argument for now
+                iter.next();
+            }
 
             // double dashes
             "--as-needed" => {
