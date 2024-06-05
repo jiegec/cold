@@ -177,6 +177,10 @@ struct Linker<'a> {
     dynamic_entries_count: usize,
     soname_dynamic_string_index: Option<StringId>,
 
+    // program header offset & len
+    phdr_offset: usize,
+    phdr_len: usize,
+
     // dynamically link against shared libraries
     dynamic_link: bool,
     needed: Vec<Needed>,
@@ -211,6 +215,8 @@ impl<'a> Linker<'a> {
             hash_section_offset: 0,
             gnu_hash_section_offset: 0,
             soname_dynamic_string_index: None,
+            phdr_offset: 0,
+            phdr_len: 0,
             dynamic_link: false,
             needed: vec![],
             output_relocations: BTreeMap::new(),
@@ -680,6 +686,8 @@ impl<'a> Linker<'a> {
             output_relocations,
             dynamic_section_index,
             dynsym_section_index,
+            phdr_offset,
+            phdr_len,
             ..
         } = self;
 
@@ -690,7 +698,7 @@ impl<'a> Linker<'a> {
         // the first page is reserved for ELF header & program header
         writer.reserve_file_header();
         // for simplicity, use one segment to map them all
-        let mut program_headers_count = 1; // PT_LOAD
+        let mut program_headers_count = 2; // PT_PHDR + PT_LOAD
         if opt.shared || self.dynamic_link {
             // PT_DYNAMIC
             program_headers_count += 1;
@@ -699,7 +707,9 @@ impl<'a> Linker<'a> {
             // PT_INTERP
             program_headers_count += 1;
         }
-        writer.reserve_program_headers(program_headers_count);
+        *phdr_offset = writer.reserved_len();
+        *phdr_len = program_headers_count * std::mem::size_of::<ProgramHeader64<LittleEndian>>();
+        writer.reserve_program_headers(program_headers_count as u32);
 
         // thus sections begin at 0x401000
         for (_name, output_section) in output_sections.iter_mut() {
@@ -881,6 +891,24 @@ impl<'a> Linker<'a> {
 
         // program headers
         // https://refspecs.linuxbase.org/elf/gabi4+/ch5.pheader.html
+
+        // PT_PHDR The array element, if present, specifies the location and
+        // size of the program header table itself, both in the file and in the
+        // memory image of the program. This segment type may not occur more
+        // than once in a file. Moreover, it may occur only if the program
+        // header table is part of the memory image of the program. If it is
+        // present, it must precede any loadable segment entry.
+        writer.write_program_header(&ProgramHeader {
+            p_type: object::elf::PT_PHDR,
+            p_flags: object::elf::PF_R,
+            p_offset: 0,
+            p_vaddr: self.load_address + self.phdr_offset as u64,
+            p_paddr: self.load_address + self.phdr_offset as u64,
+            p_filesz: self.phdr_len as u64,
+            p_memsz: self.phdr_len as u64,
+            p_align: 8,
+        });
+
         // ask kernel to load segments into memory
         if !opt.shared && self.dynamic_link {
             // PT_INTERP The array element specifies the location and size of a
