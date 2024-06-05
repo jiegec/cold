@@ -35,6 +35,7 @@ OUT=helloworld_asm \
 	helloworld2_asm_cold_rev \
 	libhelloworld3_asm_library_cold.so \
 	helloworld3_asm_cold_soname \
+	helloworld3_asm_pie_cold \
 	helloworld4_asm_cold \
 	helloworld4_c_cold \
 	uname_asm_cold \
@@ -109,6 +110,9 @@ libhelloworld3_asm_library_cold.so: helloworld3_asm_library.o
 helloworld3_asm_cold: helloworld3_asm_main.o libhelloworld3_asm_library_cold.so
 	ld -dynamic-linker /lib64/ld-linux-x86-64.so.2 helloworld3_asm_main.o libhelloworld3_asm_library_cold.so -o helloworld3_asm_cold
 
+helloworld3_asm_pie_cold: helloworld3_asm_main.o libhelloworld3_asm_library_cold.so
+	RUST_LOG=info cargo run -- -pie -dynamic-linker /lib64/ld-linux-x86-64.so.2 helloworld3_asm_main.o -L. -lhelloworld3_asm_library_cold -o helloworld3_asm_pie_cold
+
 libhelloworld3_asm_library_cold_soname.so: helloworld3_asm_library.o
 	RUST_LOG=info cargo run -- -soname test.so -shared helloworld3_asm_library.o -o libhelloworld3_asm_library_cold_soname.so
 
@@ -156,6 +160,7 @@ check: all
 	# helloworld3_asm
 	./helloworld3_asm | grep -x "Hello world!" || exit 1
 	./helloworld3_asm_pie | grep -x "Hello world!" || exit 1
+	./helloworld3_asm_pie_cold | grep -x "Hello world!" || exit 1
 	./helloworld3_asm_cold | grep -x "Hello world!" || exit 1
 	./helloworld3_asm_cold_soname | grep -x "Hello world!" || exit 1
 

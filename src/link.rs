@@ -1,7 +1,8 @@
 use crate::opt::{FileOpt, ObjectFileOpt, Opt};
 use anyhow::{anyhow, bail, Context};
 use object::elf::{
-    Sym64, DT_JMPREL, DT_NEEDED, DT_PLTGOT, DT_PLTREL, DT_PLTRELSZ, DT_RELA, R_X86_64_JUMP_SLOT,
+    ProgramHeader64, Sym64, DF_1_PIE, DT_FLAGS_1, DT_JMPREL, DT_NEEDED, DT_PLTGOT, DT_PLTREL,
+    DT_PLTRELSZ, DT_RELA, R_X86_64_JUMP_SLOT,
 };
 use object::write::elf::*;
 use object::{
@@ -693,8 +694,8 @@ impl<'a> Linker<'a> {
 
         // assign address to output sections
         // and generate layout of executable
-        // assume executable is loaded at 0x400000
-        self.load_address = if opt.shared { 0 } else { 0x400000 };
+        // assume executable is loaded at 0x400000 unless pie
+        self.load_address = if opt.shared || opt.pie { 0 } else { 0x400000 };
         // the first page is reserved for ELF header & program header
         writer.reserve_file_header();
         // for simplicity, use one segment to map them all
@@ -770,7 +771,7 @@ impl<'a> Linker<'a> {
         writer.reserve_shstrtab();
 
         // reserve dynamic, dynsym, dynstr, hash and gnu_hash
-        self.dynamic_entries_count = 5;
+        self.dynamic_entries_count = 6;
         if opt.shared || self.dynamic_link {
             // dynamic entries:
             // 1. HASH -> .hash
@@ -785,20 +786,25 @@ impl<'a> Linker<'a> {
             // 10. PLTREL
             // 11. JMPREL -> .rela.plt
             // 12. NEEDED
-            // 13. NULL
+            // 13. FLAGS_1
+            // 14. NULL
             if opt.hash_style.sysv {
+                // HASH
                 self.dynamic_entries_count += 1;
             }
             if opt.hash_style.gnu {
+                // GNU_HASH
                 self.dynamic_entries_count += 1;
             }
             if opt.soname.is_some() {
+                // SONAME
                 self.dynamic_entries_count += 1;
             }
             if self.dynamic_link {
                 // PLTGOT, PLTRELSZ, PLTREL, JMPREL
                 self.dynamic_entries_count += 4;
             }
+            // NEEDED
             self.dynamic_entries_count += self.needed.len();
 
             // align to 8 bytes boundary
@@ -878,7 +884,7 @@ impl<'a> Linker<'a> {
         writer.write_file_header(&FileHeader {
             os_abi: 0,
             abi_version: 0,
-            e_type: if opt.shared {
+            e_type: if opt.shared || opt.pie {
                 object::elf::ET_DYN
             } else {
                 object::elf::ET_EXEC
@@ -1100,7 +1106,8 @@ impl<'a> Linker<'a> {
             // 10. PLTREL
             // 11. JMPREL -> .rela.plt
             // 12. NEEDED
-            // 13. NULL
+            // 13. FLAGS_1
+            // 14. NULL
             writer.write_align_dynamic();
             if opt.hash_style.sysv {
                 // DT_HASH This element holds the address of the symbol hash
@@ -1188,6 +1195,10 @@ impl<'a> Linker<'a> {
                 writer.write_dynamic_string(DT_NEEDED, needed.name_string_id.unwrap());
             }
 
+            // DT_FLAGS_1 If present, this entry's d_val member holds various
+            // state flags.
+            writer.write_dynamic(DT_FLAGS_1, if opt.pie { DF_1_PIE.into() } else { 0 });
+
             // DT_NULL An entry with a DT_NULL tag marks the end of the _DYNAMIC
             // array.
             writer.write_dynamic(DT_NULL, 0);
@@ -1254,6 +1265,8 @@ impl<'a> Linker<'a> {
                 );
             }
         }
+
+        assert_eq!(writer.reserved_len(), writer.len());
 
         Ok(())
     }

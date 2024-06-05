@@ -30,6 +30,8 @@ https://refspecs.linuxfoundation.org/elf/elf.pdf
 https://docs.rs/goblin/latest/goblin/
 https://en.wikipedia.org/wiki/Executable_and_Linkable_Format
 https://wiki.osdev.org/ELF
+https://docs.oracle.com/en/operating-systems/solaris/oracle-solaris/11.4/linkers-libraries/elf-application-binary-interface.html
+https://blogs.oracle.com/solaris/post/gnu-hash-elf-sections
 
 # ISA
 
