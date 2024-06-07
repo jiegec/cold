@@ -316,8 +316,7 @@ impl<'a> Linker<'a> {
                         });
 
                         // walk through its dynamic symbols
-                        // skip the first symbol which is null
-                        for symbol in elf.dynamic_symbols().skip(1) {
+                        for symbol in elf.dynamic_symbols() {
                             if !symbol.is_undefined() {
                                 let name = symbol.name()?;
                                 info!("Defining dynamic symbol {}", name);
@@ -428,8 +427,7 @@ impl<'a> Linker<'a> {
                         }
                     }
 
-                    // skip the first symbol which is null
-                    for symbol in elf.symbols().skip(1) {
+                    for symbol in elf.symbols() {
                         if !symbol.is_undefined()
                             && symbol.kind() != object::SymbolKind::Section
                             && symbol.kind() != object::SymbolKind::File
