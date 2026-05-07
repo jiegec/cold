@@ -1343,7 +1343,7 @@ impl<'a> Linker<'a> {
                     // R_X86_64_PLT32
                     (
                         object::RelocationKind::PltRelative,
-                        object::RelocationEncoding::Generic,
+                        object::RelocationEncoding::X86Branch,
                         32,
                     ) => {
                         info!("Relocation type is R_X86_64_PLT32");
