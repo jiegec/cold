@@ -1111,34 +1111,34 @@ impl<'a> Linker<'a> {
                 // DT_HASH This element holds the address of the symbol hash
                 // table, described in ``Hash Table''. This hash table refers to
                 // the symbol table referenced by the DT_SYMTAB element.
-                writer.write_dynamic(DT_HASH, self.hash_section_offset + self.load_address);
+                writer.write_dynamic(DT_HASH, self.hash_section_offset + self.load_address)?;
             }
             if opt.hash_style.gnu {
                 writer.write_dynamic(
                     DT_GNU_HASH,
                     self.gnu_hash_section_offset + self.load_address,
-                );
+                )?;
             }
 
             // DT_STRTAB This element holds the address of the string table,
             // described in Chapter 4. Symbol names, library names, and other
             // strings reside in this table.
-            writer.write_dynamic(DT_STRTAB, self.dynstr_section_offset + self.load_address);
+            writer.write_dynamic(DT_STRTAB, self.dynstr_section_offset + self.load_address)?;
 
             // DT_SYMTAB This element holds the address of the symbol table,
             // described in the first part of this chapter, with Elf32_Sym
             // entries for the 32-bit class of files and Elf64_Sym entries for
             // the 64-bit class of files.
-            writer.write_dynamic(DT_SYMTAB, self.dynsym_section_offset + self.load_address);
+            writer.write_dynamic(DT_SYMTAB, self.dynsym_section_offset + self.load_address)?;
 
             // DT_STRSZ This element holds the size, in bytes, of the string
             // table.
             let strsz = writer.dynstr_len() as u64;
-            writer.write_dynamic(DT_STRSZ, strsz); // size of dynamic string table
+            writer.write_dynamic(DT_STRSZ, strsz)?; // size of dynamic string table
 
             // DT_SYMENT This element holds the size, in bytes, of a symbol
             // table entry.
-            writer.write_dynamic(DT_SYMENT, std::mem::size_of::<Sym64<LittleEndian>>() as u64); // entry size
+            writer.write_dynamic(DT_SYMENT, std::mem::size_of::<Sym64<LittleEndian>>() as u64)?; // entry size
 
             if let Some(soname_dynamic_string_index) = &soname_dynamic_string_index {
                 // DT_SONAME This element holds the string table offset of a
@@ -1146,14 +1146,14 @@ impl<'a> Linker<'a> {
                 // The offset is an index into the table recorded in the
                 // DT_STRTAB entry. See ``Shared Object Dependencies'' below for
                 // more information about these names.
-                writer.write_dynamic_string(DT_SONAME, *soname_dynamic_string_index);
+                writer.write_dynamic_string(DT_SONAME, *soname_dynamic_string_index)?;
             }
 
             if self.dynamic_link {
                 // DT_PLTGOT This element holds an address associated with the
                 // procedure linkage table and/or the global offset table. See
                 // this section in the processor supplement for details.
-                writer.write_dynamic(DT_PLTGOT, section_address[".got.plt"]);
+                writer.write_dynamic(DT_PLTGOT, section_address[".got.plt"])?;
 
                 // DT_PLTRELSZ This element holds the total size, in bytes, of
                 // the relocation entries associated with the procedure linkage
@@ -1164,13 +1164,13 @@ impl<'a> Linker<'a> {
                     (output_relocations[".rela.plt"].relocations.len()
                         * std::mem::size_of::<object::elf::Rela64<LittleEndian>>())
                         as u64,
-                );
+                )?;
 
                 // DT_PLTREL This member specifies the type of relocation entry
                 // to which the procedure linkage table refers. The d_val member
                 // holds DT_REL or DT_RELA, as appropriate. All relocations in a
                 // procedure linkage table must use the same relocation.
-                writer.write_dynamic(DT_PLTREL, DT_RELA as u64);
+                writer.write_dynamic(DT_PLTREL, DT_RELA as u64)?;
 
                 // DT_JMPREL If present, this entry's d_ptr member holds the
                 // address of relocation entries associated solely with the
@@ -1179,7 +1179,7 @@ impl<'a> Linker<'a> {
                 // initialization, if lazy binding is enabled. If this entry is
                 // present, the related entries of types DT_PLTRELSZ and
                 // DT_PLTREL must also be present.
-                writer.write_dynamic(DT_JMPREL, section_address[".rela.plt"]);
+                writer.write_dynamic(DT_JMPREL, section_address[".rela.plt"])?;
             }
             for needed in &self.needed {
                 // DT_NEEDED This element holds the string table offset of a
@@ -1190,16 +1190,16 @@ impl<'a> Linker<'a> {
                 // multiple entries with this type. These entries' relative
                 // order is significant, though their relation to entries of
                 // other types is not.
-                writer.write_dynamic_string(DT_NEEDED, needed.name_string_id.unwrap());
+                writer.write_dynamic_string(DT_NEEDED, needed.name_string_id.unwrap())?;
             }
 
             // DT_FLAGS_1 If present, this entry's d_val member holds various
             // state flags.
-            writer.write_dynamic(DT_FLAGS_1, if opt.pie { DF_1_PIE.into() } else { 0 });
+            writer.write_dynamic(DT_FLAGS_1, if opt.pie { DF_1_PIE.into() } else { 0 })?;
 
             // DT_NULL An entry with a DT_NULL tag marks the end of the _DYNAMIC
             // array.
-            writer.write_dynamic(DT_NULL, 0);
+            writer.write_dynamic(DT_NULL, 0)?;
 
             // write dynamic symbols
             writer.write_null_dynamic_symbol();
