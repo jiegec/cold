@@ -179,8 +179,8 @@ struct Linker<'a> {
     soname_dynamic_string_index: Option<StringId>,
 
     // program header offset & len
-    phdr_offset: usize,
-    phdr_len: usize,
+    phdr_offset: u64,
+    phdr_len: u64,
 
     // dynamically link against shared libraries
     dynamic_link: bool,
@@ -340,14 +340,14 @@ impl<'a> Linker<'a> {
                             let _span = info_span!("section", name).entered();
                             let data = section.data()?;
                             let (is_executable, is_writable) = match section.flags() {
-                                object::SectionFlags::Elf { sh_flags } => {
-                                    if ((sh_flags as u32) & object::elf::SHF_ALLOC) == 0 {
+                                object::SectionFlags::Elf { sh_flags, .. } => {
+                                    if (sh_flags.0 & object::elf::SHF_ALLOC.0) == 0 {
                                         // non-alloc, skip
                                         continue;
                                     } else {
                                         (
-                                            ((sh_flags as u32) & object::elf::SHF_EXECINSTR) != 0,
-                                            ((sh_flags as u32) & object::elf::SHF_WRITE) != 0,
+                                            (sh_flags.0 & object::elf::SHF_EXECINSTR.0) != 0,
+                                            (sh_flags.0 & object::elf::SHF_WRITE.0) != 0,
                                         )
                                     }
                                 }
@@ -707,22 +707,24 @@ impl<'a> Linker<'a> {
             program_headers_count += 1;
         }
         *phdr_offset = writer.reserved_len();
-        *phdr_len = program_headers_count * std::mem::size_of::<ProgramHeader64<LittleEndian>>();
+        *phdr_len =
+            (program_headers_count * std::mem::size_of::<ProgramHeader64<LittleEndian>>()) as u64;
         writer.reserve_program_headers(program_headers_count as u32);
 
         // thus sections begin at 0x401000
         for (_name, output_section) in output_sections.iter_mut() {
-            output_section.offset = writer.reserve(output_section.content.len(), 4096) as u64;
+            output_section.offset = writer.reserve(output_section.content.len() as u64, 4096);
         }
         info!("Got {} output sections", output_sections.len());
 
         // reserve .rela.xx sections
         for (_name, output_section) in output_relocations.iter_mut() {
             output_section.offset = writer.reserve(
-                output_section.relocations.len()
-                    * std::mem::size_of::<object::elf::Rela64<LittleEndian>>(),
+                (output_section.relocations.len()
+                    * std::mem::size_of::<object::elf::Rela64<LittleEndian>>())
+                    as u64,
                 8,
-            ) as u64;
+            );
         }
 
         // reserve section headers
@@ -765,8 +767,8 @@ impl<'a> Linker<'a> {
 
         // reserve symtab, strtab and shstrtab
         writer.reserve_symtab();
-        writer.reserve_strtab();
-        writer.reserve_shstrtab();
+        writer.reserve_strtab()?;
+        writer.reserve_shstrtab()?;
 
         // reserve dynamic, dynsym, dynstr, hash and gnu_hash
         self.dynamic_entries_count = 6;
@@ -806,7 +808,7 @@ impl<'a> Linker<'a> {
             self.dynamic_entries_count += self.needed.len();
 
             // align to 8 bytes boundary
-            self.dynamic_section_offset = writer.reserve_dynamic(self.dynamic_entries_count) as u64;
+            self.dynamic_section_offset = writer.reserve_dynamic(self.dynamic_entries_count);
 
             // dynamic symbols
             writer.reserve_null_dynamic_symbol_index();
@@ -827,10 +829,10 @@ impl<'a> Linker<'a> {
                     Some(writer.add_dynamic_string(arena.alloc_str(&needed.name).as_bytes()));
             }
 
-            self.dynsym_section_offset = writer.reserve_dynsym() as u64;
+            self.dynsym_section_offset = writer.reserve_dynsym();
 
             // dynamic string
-            self.dynstr_section_offset = writer.reserve_dynstr() as u64;
+            self.dynstr_section_offset = writer.reserve_dynstr()?;
 
             // hash table
             let plt_dynamic_symbols_count = plt_dynamic_symbols.len() as u32;
@@ -840,14 +842,14 @@ impl<'a> Linker<'a> {
                 self.hash_section_offset = writer.reserve_hash(
                     plt_dynamic_symbols_count + dynamic_symbols_count,
                     plt_dynamic_symbols_count + dynamic_symbols_count + 1,
-                ) as u64;
+                );
             }
 
             // gnu hash table
             if opt.hash_style.gnu {
                 // plt dynamic symbols are not included in gnu hash table
                 self.gnu_hash_section_offset =
-                    writer.reserve_gnu_hash(1, dynamic_symbols_count, dynamic_symbols_count) as u64;
+                    writer.reserve_gnu_hash(1, dynamic_symbols_count, dynamic_symbols_count);
             }
         };
 
@@ -880,7 +882,7 @@ impl<'a> Linker<'a> {
 
         // ELF header
         writer.write_file_header(&FileHeader {
-            os_abi: 0,
+            os_abi: object::elf::OsAbi(0),
             abi_version: 0,
             e_type: if opt.shared || opt.pie {
                 object::elf::ET_DYN
@@ -890,7 +892,7 @@ impl<'a> Linker<'a> {
             e_machine: object::elf::EM_X86_64,
             // assume that entrypoint is pointed at _start
             e_entry: entry_address,
-            e_flags: 0,
+            e_flags: object::elf::FileFlags(0),
         })?;
 
         // program headers
@@ -906,10 +908,10 @@ impl<'a> Linker<'a> {
             p_type: object::elf::PT_PHDR,
             p_flags: object::elf::PF_R,
             p_offset: 0,
-            p_vaddr: self.load_address + self.phdr_offset as u64,
-            p_paddr: self.load_address + self.phdr_offset as u64,
-            p_filesz: self.phdr_len as u64,
-            p_memsz: self.phdr_len as u64,
+            p_vaddr: self.load_address + self.phdr_offset,
+            p_paddr: self.load_address + self.phdr_offset,
+            p_filesz: self.phdr_len,
+            p_memsz: self.phdr_len,
             p_align: 8,
         });
 
@@ -972,11 +974,11 @@ impl<'a> Linker<'a> {
 
         // write section data
         for (_name, output_section) in output_sections.iter() {
-            writer.pad_until(output_section.offset as usize);
+            writer.pad_until(output_section.offset);
             writer.write(&output_section.content);
         }
         for (_name, output_section) in output_relocations.iter() {
-            writer.pad_until(output_section.offset as usize);
+            writer.pad_until(output_section.offset);
             for rel in &output_section.relocations {
                 // turn offset into absolute
                 let mut rel = rel.clone();
@@ -997,13 +999,13 @@ impl<'a> Linker<'a> {
             }
 
             writer.write_section_header(&SectionHeader {
-                name: output_section.name_string_id,
+                sh_name: writer.section_name_offset(output_section.name_string_id),
                 sh_type: if output_section.is_bss {
                     object::elf::SHT_NOBITS
                 } else {
                     object::elf::SHT_PROGBITS
                 },
-                sh_flags: flags as u64,
+                sh_flags: flags,
                 sh_addr: section_address[name],
                 sh_offset: output_section.offset,
                 sh_size: output_section.content.len() as u64,
@@ -1018,9 +1020,9 @@ impl<'a> Linker<'a> {
 
             let entsize = std::mem::size_of::<object::elf::Rela64<LittleEndian>>();
             writer.write_section_header(&SectionHeader {
-                name: output_section.name_string_id,
+                sh_name: writer.section_name_offset(output_section.name_string_id),
                 sh_type: object::elf::SHT_RELA,
-                sh_flags: flags as u64,
+                sh_flags: flags,
                 sh_addr: section_address[name],
                 sh_offset: output_section.offset,
                 sh_size: (output_section.relocations.len() * entsize) as u64,
@@ -1062,21 +1064,25 @@ impl<'a> Linker<'a> {
         for (_symbol_name, symbol) in symbols_vec {
             let address = section_address[&symbol.section_name] + symbol.offset;
             writer.write_symbol(&Sym {
-                name: symbol.symbol_name_string_id,
+                st_name: writer.string_offset(symbol.symbol_name_string_id),
                 section: if symbol.is_plt {
                     None // UNDEF
                 } else if symbol.section_name == ".dynamic" {
-                    Some(self.dynamic_section_index)
+                    Some(self.dynamic_section_index.0)
                 } else {
-                    output_sections[&symbol.section_name].section_index
+                    output_sections[&symbol.section_name]
+                        .section_index
+                        .map(|index| index.0)
                 },
-                st_info: if symbol.is_global {
-                    (object::elf::STB_GLOBAL) << 4
-                } else {
-                    (object::elf::STB_LOCAL) << 4
-                },
-                st_other: 0,
-                st_shndx: 0,
+                st_info: object::elf::SymbolInfo(
+                    if symbol.is_global {
+                        object::elf::STB_GLOBAL.0
+                    } else {
+                        object::elf::STB_LOCAL.0
+                    } << 4,
+                ),
+                st_other: object::elf::SymbolOther(0),
+                st_shndx: object::elf::SymbolSection(0),
                 st_value: if symbol.is_plt { 0 } else { address },
                 st_size: 0,
             });
@@ -1170,7 +1176,7 @@ impl<'a> Linker<'a> {
                 // to which the procedure linkage table refers. The d_val member
                 // holds DT_REL or DT_RELA, as appropriate. All relocations in a
                 // procedure linkage table must use the same relocation.
-                writer.write_dynamic(DT_PLTREL, DT_RELA as u64)?;
+                writer.write_dynamic(DT_PLTREL, DT_RELA.0 as u64)?;
 
                 // DT_JMPREL If present, this entry's d_ptr member holds the
                 // address of relocation entries associated solely with the
@@ -1195,7 +1201,7 @@ impl<'a> Linker<'a> {
 
             // DT_FLAGS_1 If present, this entry's d_val member holds various
             // state flags.
-            writer.write_dynamic(DT_FLAGS_1, if opt.pie { DF_1_PIE.into() } else { 0 })?;
+            writer.write_dynamic(DT_FLAGS_1, if opt.pie { DF_1_PIE.0 } else { 0 })?;
 
             // DT_NULL An entry with a DT_NULL tag marks the end of the _DYNAMIC
             // array.
@@ -1207,15 +1213,17 @@ impl<'a> Linker<'a> {
                 let symbol = symbols.get(&dyn_sym.name).unwrap();
                 let address = section_address[&symbol.section_name] + symbol.offset;
                 writer.write_dynamic_symbol(&Sym {
-                    name: symbol.symbol_name_dynamic_string_id,
+                    st_name: writer.dynamic_string_offset(symbol.symbol_name_dynamic_string_id),
                     section: if symbol.is_plt {
                         None
                     } else {
-                        output_sections[&symbol.section_name].section_index
+                        output_sections[&symbol.section_name]
+                            .section_index
+                            .map(|index| index.0)
                     },
-                    st_info: (object::elf::STB_GLOBAL) << 4,
-                    st_other: 0,
-                    st_shndx: 0,
+                    st_info: object::elf::SymbolInfo(object::elf::STB_GLOBAL.0 << 4),
+                    st_other: object::elf::SymbolOther(0),
+                    st_shndx: object::elf::SymbolSection(0),
                     st_value: if symbol.is_plt { 0 } else { address },
                     st_size: 0,
                 });
